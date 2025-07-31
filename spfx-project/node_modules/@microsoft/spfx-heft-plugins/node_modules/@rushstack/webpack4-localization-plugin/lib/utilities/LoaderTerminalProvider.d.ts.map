@@ -1,0 +1,1 @@
+{"version":3,"file":"LoaderTerminalProvider.d.ts","sourceRoot":"","sources":["../../src/utilities/LoaderTerminalProvider.ts"],"names":[],"mappings":"AAGA,OAAO,KAAK,OAAO,MAAM,SAAS,CAAC;AACnC,OAAO,EAAE,iBAAiB,EAA4B,MAAM,8BAA8B,CAAC;AAE3F,qBAAa,sBAAsB;WACnB,4BAA4B,CAAC,aAAa,EAAE,OAAO,CAAC,MAAM,CAAC,aAAa,GAAG,iBAAiB;CAmB3G"}

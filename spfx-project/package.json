@@ -1,0 +1,43 @@
+{
+  "name": "cc-project-manager-spfx",
+  "version": "1.0.0",
+  "description": "C&C Project Manager - SharePoint Framework Web Part",
+  "main": "lib/index.js",
+  "scripts": {
+    "build": "gulp build",
+    "clean": "gulp clean",
+    "test": "gulp test",
+    "serve": "gulp serve",
+    "bundle": "gulp bundle",
+    "package-solution": "gulp package-solution"
+  },
+  "dependencies": {
+    "@microsoft/sp-core-library": "1.17.4",
+    "@microsoft/sp-lodash-subset": "1.17.4",
+    "@microsoft/sp-office-ui-fabric-core": "1.17.4",
+    "@microsoft/sp-property-pane": "1.17.4",
+    "@microsoft/sp-webpart-base": "1.17.4",
+    "@microsoft/sp-http": "1.17.4",
+    "@microsoft/sp-page-context": "1.17.4",
+    "react": "17.0.1",
+    "react-dom": "17.0.1",
+    "date-fns": "^2.30.0",
+    "tailwindcss": "^3.3.0",
+    "autoprefixer": "^10.4.14",
+    "postcss": "^8.4.24"
+  },
+  "devDependencies": {
+    "@microsoft/rush-stack-compiler-4.5": "0.1.0",
+    "@microsoft/sp-build-web": "1.17.4",
+    "@microsoft/sp-module-interfaces": "1.17.4",
+    "@microsoft/sp-tslint-rules": "1.17.4",
+    "@types/react": "17.0.45",
+    "@types/react-dom": "17.0.17",
+    "@types/webpack-env": "1.18.0",
+    "gulp": "4.0.2",
+    "typescript": "4.7.4"
+  },
+  "engines": {
+    "node": ">=14.0.0"
+  }
+} 

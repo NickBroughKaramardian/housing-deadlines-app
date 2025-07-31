@@ -1,70 +1,89 @@
-# Getting Started with Create React App
+# Housing Deadlines App
 
-This project was bootstrapped with [Create React App](https://github.com/facebook/create-react-app).
+A comprehensive project management application for handling housing-related deadlines and tasks with advanced recurring task support.
 
-## Available Scripts
+## Features
 
-In the project directory, you can run:
+### Core Functionality
+- **Task Management**: Add, edit, delete, and mark tasks as urgent
+- **Batch Entry**: Import multiple tasks via table entry or spreadsheet upload (CSV/XLSX)
+- **Advanced Sorting & Filtering**: Sort by deadline, responsible party, project, recurring status, urgent status, or search across multiple fields
+- **Dashboard**: Overview of this week's deadlines and interactive notes board
 
-### `npm start`
+### Recurring Tasks (NEW!)
+The app now features **intelligent recurring task expansion** that automatically generates all individual instances of recurring deadlines:
 
-Runs the app in the development mode.\
-Open [http://localhost:3000](http://localhost:3000) to view it in your browser.
+- **Automatic Expansion**: Recurring tasks are automatically expanded into all their individual instances
+- **Multiple Frequencies**: Supports Monthly, Quarterly, Biannually, and Yearly recurring patterns
+- **Year Range Support**: Specify a final year to generate instances across multiple years
+- **Smart Date Handling**: Automatically handles month overflow (e.g., 31st day in months with 30 days)
+- **Individual Instance Management**: Each expanded instance can be individually marked as urgent or deleted
+- **Search & Filter Integration**: All expanded instances appear in search results and filters
 
-The page will reload when you make changes.\
-You may also see any lint errors in the console.
+#### Example
+If you create a monthly recurring task from 2024-2026:
+- **Original Task**: "Monthly Report" due 2024-01-15, recurring monthly until 2026
+- **Expanded Instances**: 36 individual tasks (12 per year × 3 years)
+- **Search Results**: Searching for "2025" will show all 12 instances for that year
+- **Dashboard**: Each instance appears separately in "Deadlines This Week" when applicable
 
-### `npm test`
+### Batch Import Features
+- **Table Entry**: Excel-like table interface with paste support
+- **Spreadsheet Import**: Direct CSV/XLSX file upload with automatic column mapping
+- **Validation**: Comprehensive error checking with detailed feedback
+- **Flexible Input**: Accepts various date formats and recurring task indicators
 
-Launches the test runner in the interactive watch mode.\
-See the section about [running tests](https://facebook.github.io/create-react-app/docs/running-tests) for more information.
+### UI/UX Features
+- **Modern Design**: Clean, minimalistic interface with Tailwind CSS
+- **Color-Coded Deadlines**: Visual indicators for urgency (red/yellow/green)
+- **Responsive Layout**: Works on desktop and mobile devices
+- **Accessibility**: Keyboard navigation and screen reader support
 
-### `npm run build`
+## Getting Started
 
-Builds the app for production to the `build` folder.\
-It correctly bundles React in production mode and optimizes the build for the best performance.
+1. **Install Dependencies**:
+   ```bash
+   npm install
+   ```
 
-The build is minified and the filenames include the hashes.\
-Your app is ready to be deployed!
+2. **Start Development Server**:
+   ```bash
+   npm start
+   ```
 
-See the section about [deployment](https://facebook.github.io/create-react-app/docs/deployment) for more information.
+3. **Open Browser**: Navigate to `http://localhost:3000`
 
-### `npm run eject`
+## Usage
 
-**Note: this is a one-way operation. Once you `eject`, you can't go back!**
+### Adding Tasks
+1. Navigate to "Add Tasks" tab
+2. Choose between single task entry or batch entry
+3. For batch entry, use table mode or upload a spreadsheet
+4. Set recurring options if needed (frequency and final year)
 
-If you aren't satisfied with the build tool and configuration choices, you can `eject` at any time. This command will remove the single build dependency from your project.
+### Managing Recurring Tasks
+1. **Create**: Set recurring = true, choose frequency, specify final year
+2. **View**: All instances automatically appear in the task list
+3. **Filter**: Use "Recurring" filter to see only recurring tasks
+4. **Search**: Search by year to see all instances for that period
+5. **Edit**: Edit the original task to update all instances
+6. **Delete**: Delete individual instances or the original to remove all
 
-Instead, it will copy all the configuration files and the transitive dependencies (webpack, Babel, ESLint, etc) right into your project so you have full control over them. All of the commands except `eject` will still work, but they will point to the copied scripts so you can tweak them. At this point you're on your own.
+### Sorting & Filtering
+- **Deadline**: Filter by year, month, and/or day
+- **Responsible Party**: Filter by specific person/team
+- **Project**: Filter by project name
+- **Recurring**: Show only recurring or non-recurring tasks
+- **Urgent**: Show only urgent tasks
+- **Search**: Search across project, description, responsible party, and frequency
 
-You don't have to ever use `eject`. The curated feature set is suitable for small and middle deployments, and you shouldn't feel obligated to use this feature. However we understand that this tool wouldn't be useful if you couldn't customize it when you are ready for it.
+## Data Storage
+All data is stored locally in the browser's localStorage, ensuring privacy and offline access.
 
-## Learn More
-
-You can learn more in the [Create React App documentation](https://facebook.github.io/create-react-app/docs/getting-started).
-
-To learn React, check out the [React documentation](https://reactjs.org/).
-
-### Code Splitting
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/code-splitting](https://facebook.github.io/create-react-app/docs/code-splitting)
-
-### Analyzing the Bundle Size
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size](https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size)
-
-### Making a Progressive Web App
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app](https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app)
-
-### Advanced Configuration
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/advanced-configuration](https://facebook.github.io/create-react-app/docs/advanced-configuration)
-
-### Deployment
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/deployment](https://facebook.github.io/create-react-app/docs/deployment)
-
-### `npm run build` fails to minify
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify](https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify)
+## Technologies Used
+- React 18
+- Tailwind CSS
+- date-fns (date manipulation)
+- Papa Parse (CSV parsing)
+- SheetJS (Excel file parsing)
+- Heroicons (UI icons)

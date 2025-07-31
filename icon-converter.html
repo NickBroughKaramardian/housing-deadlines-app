@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Icon Converter</title>
+    <style>
+        body { font-family: Arial, sans-serif; padding: 20px; }
+        .download-btn { 
+            background: #4CAF50; 
+            color: white; 
+            padding: 10px 20px; 
+            border: none; 
+            border-radius: 5px; 
+            cursor: pointer; 
+            margin: 5px;
+        }
+        .download-btn:hover { background: #45a049; }
+    </style>
+</head>
+<body>
+    <h2>Convert CC_App_Icon.svg to PNG</h2>
+    <p>Click the buttons below to download PNG files of different sizes:</p>
+    
+    <button class="download-btn" onclick="convertToPNG(192, 192, 'logo192.png')">Download 192x192</button>
+    <button class="download-btn" onclick="convertToPNG(512, 512, 'logo512.png')">Download 512x512</button>
+    <button class="download-btn" onclick="convertToPNG(180, 180, 'apple-touch-icon.png')">Download 180x180</button>
+    <button class="download-btn" onclick="convertToPNG(32, 32, 'favicon-32x32.png')">Download 32x32</button>
+    <button class="download-btn" onclick="convertToPNG(16, 16, 'favicon-16x16.png')">Download 16x16</button>
+    
+    <div id="canvas-container" style="display: none;"></div>
+    
+    <script>
+        function convertToPNG(width, height, filename) {
+            // Create a canvas
+            const canvas = document.createElement('canvas');
+            canvas.width = width;
+            canvas.height = height;
+            const ctx = canvas.getContext('2d');
+            
+            // Create an image element
+            const img = new Image();
+            img.crossOrigin = 'anonymous';
+            
+            img.onload = function() {
+                // Clear canvas
+                ctx.clearRect(0, 0, width, height);
+                
+                // Draw the SVG image
+                ctx.drawImage(img, 0, 0, width, height);
+                
+                // Convert to blob and download
+                canvas.toBlob(function(blob) {
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = filename;
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    URL.revokeObjectURL(url);
+                });
+            };
+            
+            // Load the SVG file
+            img.src = 'CC_App_Icon.svg';
+        }
+    </script>
+</body>
+</html> 

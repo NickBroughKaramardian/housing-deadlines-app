@@ -1,0 +1,114 @@
+{
+  "$schema": "https://developer.microsoft.com/en-us/json-schemas/teams/v1.16/MicrosoftTeams.schema.json",
+  "manifestVersion": "1.16",
+  "version": "1.0.0",
+  "id": "cc-project-manager",
+  "packageName": "com.ccdev.projectmanager",
+  "developer": {
+    "name": "C&C Development",
+    "websiteUrl": "https://ccprojectmanager.web.app",
+    "privacyUrl": "https://ccprojectmanager.web.app/privacy",
+    "termsOfUseUrl": "https://ccprojectmanager.web.app/terms"
+  },
+  "name": {
+    "short": "C&C Project Manager",
+    "full": "C&C Development Project Management & Deadlines"
+  },
+  "description": {
+    "short": "Manage project deadlines and tasks",
+    "full": "Comprehensive project management application for handling housing-related deadlines and tasks with advanced recurring task support, team collaboration, and real-time updates."
+  },
+  "icons": {
+    "outline": "outline.png",
+    "color": "color.png"
+  },
+  "accentColor": "#2563eb",
+  "configurableTabs": [
+    {
+      "configurationUrl": "https://ccprojectmanager.web.app/teams-config",
+      "canUpdateConfiguration": true,
+      "scopes": [
+        "team",
+        "groupchat"
+      ]
+    }
+  ],
+  "staticTabs": [
+    {
+      "entityId": "dashboard",
+      "name": "Dashboard",
+      "contentUrl": "https://ccprojectmanager.web.app/teams?tab=dashboard",
+      "websiteUrl": "https://ccprojectmanager.web.app/teams?tab=dashboard",
+      "scopes": [
+        "personal"
+      ]
+    },
+    {
+      "entityId": "tasks",
+      "name": "Tasks",
+      "contentUrl": "https://ccprojectmanager.web.app/teams?tab=sort",
+      "websiteUrl": "https://ccprojectmanager.web.app/teams?tab=sort",
+      "scopes": [
+        "personal"
+      ]
+    },
+    {
+      "entityId": "calendar",
+      "name": "Calendar",
+      "contentUrl": "https://ccprojectmanager.web.app/teams?tab=calendar",
+      "websiteUrl": "https://ccprojectmanager.web.app/teams?tab=calendar",
+      "scopes": [
+        "personal"
+      ]
+    }
+  ],
+  "permissions": [
+    "identity",
+    "messageTeamMembers"
+  ],
+  "validDomains": [
+    "ccprojectmanager.web.app",
+    "*.firebaseapp.com"
+  ],
+  "webApplicationInfo": {
+    "id": "cc-project-manager",
+    "resource": "https://ccprojectmanager.web.app"
+  },
+  "composeExtensions": [
+    {
+      "botId": "cc-project-manager-bot",
+      "commands": [
+        {
+          "id": "addTask",
+          "type": "action",
+          "context": [
+            "compose"
+          ],
+          "description": "Add a new task to the project manager",
+          "title": "Add Task",
+          "fetchTask": true,
+          "parameters": [
+            {
+              "name": "projectName",
+              "title": "Project Name",
+              "description": "Name of the project",
+              "inputType": "text"
+            },
+            {
+              "name": "description",
+              "title": "Task Description",
+              "description": "Description of the task",
+              "inputType": "text"
+            },
+            {
+              "name": "deadline",
+              "title": "Deadline",
+              "description": "Task deadline (YYYY-MM-DD)",
+              "inputType": "text"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+} 

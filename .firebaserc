@@ -1,0 +1,15 @@
+{
+  "projects": {
+    "default": "cc-project-manager"
+  },
+  "targets": {
+    "cc-project-manager": {
+      "hosting": {
+        "ccprojectmanager": [
+          "ccprojectmanager"
+        ]
+      }
+    }
+  },
+  "etags": {}
+}
