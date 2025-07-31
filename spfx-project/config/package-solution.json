@@ -1,0 +1,20 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/spfx-build/package-solution.schema.json",
+  "solution": {
+    "name": "cc-project-manager-spfx",
+    "id": "cc-project-manager-spfx",
+    "version": "1.0.0.0",
+    "includeClientSideAssets": true,
+    "isDomainIsolated": false,
+    "developer": {
+      "name": "C&C Development",
+      "mpnId": "00000000-0000-0000-0000-000000000000",
+      "websiteUrl": "https://c-cdev.com",
+      "privacyUrl": "https://c-cdev.com/privacy",
+      "termsOfUseUrl": "https://c-cdev.com/terms"
+    }
+  },
+  "paths": {
+    "zippedPackage": "solution/cc-project-manager-spfx.sppkg"
+  }
+} 

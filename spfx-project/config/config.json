@@ -1,0 +1,16 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/spfx-build/config.2.0.schema.json",
+  "version": "1.0.0",
+  "bundles": {
+    "cc-project-manager-web-part": {
+      "components": [
+        {
+          "entrypoint": "./lib/webparts/ccProjectManager/CcProjectManagerWebPart.js",
+          "manifest": "./src/webparts/ccProjectManager/CcProjectManagerWebPart.manifest.json"
+        }
+      ]
+    }
+  },
+  "externals": {},
+  "localizedResources": {}
+} 
