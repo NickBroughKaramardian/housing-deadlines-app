@@ -109,6 +109,7 @@ function App() {
   const [editTaskId, setEditTaskId] = useState(null);
   const [editForm, setEditForm] = useState({});
   const [showIncompleteOnly, setShowIncompleteOnly] = useState(false);
+  const [taskStatusFilter, setTaskStatusFilter] = useState('all'); // 'all', 'overdue', 'active', 'completed'
   const [overrides, setOverrides] = useState([]);
   const [notesModalOpen, setNotesModalOpen] = useState(false);
   const [notesTaskId, setNotesTaskId] = useState(null);
@@ -448,7 +449,39 @@ function App() {
       });
     }
 
-    // Filter to only show incomplete tasks if the checkbox is checked
+    // Filter by task status (overdue, active, urgent, completed)
+    if (taskStatusFilter !== 'all') {
+      const today = new Date();
+      filtered = filtered.filter(task => {
+        const deadlineDate = parseDeadlineDate(task.deadline);
+        if (!deadlineDate) return false;
+        
+        const daysDiff = Math.ceil((deadlineDate.setHours(0,0,0,0) - today.setHours(0,0,0,0)) / 86400000);
+        
+        if (taskStatusFilter === 'completed') {
+          return task.completed;
+        } else if (taskStatusFilter === 'overdue') {
+          return !task.completed && daysDiff < 0 && daysDiff > -90; // Overdue but not more than 90 days
+        } else if (taskStatusFilter === 'active') {
+          return !task.completed && daysDiff >= 0;
+        } else if (taskStatusFilter === 'urgent') {
+          return task.important && !task.completed; // Show urgent tasks that are not completed
+        }
+        return true;
+      });
+    } else {
+      // Filter out tasks overdue by more than 90 days when showing all
+      const today = new Date();
+      filtered = filtered.filter(task => {
+        const deadlineDate = parseDeadlineDate(task.deadline);
+        if (!deadlineDate) return true; // Keep tasks without dates
+        
+        const daysDiff = Math.ceil((deadlineDate.setHours(0,0,0,0) - today.setHours(0,0,0,0)) / 86400000);
+        return daysDiff >= -90; // Hide tasks overdue by more than 90 days
+      });
+    }
+
+    // Filter to only show incomplete tasks if the checkbox is checked (legacy support)
     if (showIncompleteOnly) {
       filtered = filtered.filter(task => !task.completed);
     }
@@ -878,14 +911,35 @@ function App() {
         
         {activeTab === 'sort' && (
           <>
-            {/* Modern, colorful filter bar */}
-            <div className="mb-6 lg:mb-8 sticky top-20 z-10 bg-white/90 dark:bg-gray-800/90 backdrop-blur border-b border-gray-100 dark:border-gray-700 py-3 lg:py-4 px-3 lg:px-4 rounded-xl shadow">
-              <div className="flex flex-col lg:flex-row gap-3 lg:gap-4 items-start lg:items-center">
-                <div className="flex flex-col sm:flex-row gap-2 lg:gap-3 items-start sm:items-center w-full lg:w-auto">
+            {/* Sleek, glassy header */}
+            <div className="w-full bg-gradient-to-br from-white to-gray-50 dark:from-gray-800 dark:to-gray-900 rounded-2xl shadow-xl border border-gray-100 dark:border-gray-700 p-6 lg:p-8 mb-8">
+              <div className="flex flex-col lg:flex-row items-start lg:items-center justify-between mb-6 gap-6">
+                <div className="flex items-center gap-6">
+                  <div className="flex items-center gap-3">
+                    <div className="w-12 h-12 bg-gradient-to-br from-theme-primary to-theme-primary-hover rounded-xl flex items-center justify-center shadow-lg">
+                      <svg className="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.207A1 1 0 013 6.5V4z" />
+                      </svg>
+                    </div>
+                    <div>
+                      <h2 className="text-3xl font-bold bg-gradient-to-r from-gray-800 to-gray-600 dark:from-white dark:to-gray-300 bg-clip-text text-transparent">
+                        Sort Deadlines
+                      </h2>
+                      <p className="text-sm text-gray-600 dark:text-gray-400 mt-1">
+                        Filter and organize your tasks with precision
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Modern filter controls */}
+              <div className="flex flex-col lg:flex-row gap-4 items-start lg:items-center">
+                <div className="flex flex-col sm:flex-row gap-3 items-start sm:items-center w-full lg:w-auto">
                   <select
                     value={sortOption}
                     onChange={(e) => setSortOption(e.target.value)}
-                    className="px-3 lg:px-5 py-2 rounded-full border-2 border-gray-400 bg-white text-sm lg:text-base font-semibold text-gray-700 shadow-sm focus:outline-none focus:ring-2 focus:ring-gray-400 transition-all w-full sm:w-auto min-w-[140px] lg:min-w-[160px]"
+                    className="px-4 py-2 rounded-xl border-2 border-gray-200 dark:border-gray-600 bg-white dark:bg-gray-700 text-sm font-semibold text-gray-700 dark:text-gray-300 shadow-sm focus:outline-none focus:ring-2 focus:ring-theme-primary focus:border-transparent transition-all w-full sm:w-auto min-w-[160px]"
                   >
                     <option value="">Sort by...</option>
                     <option value="Deadline">Deadline</option>
@@ -894,38 +948,82 @@ function App() {
                     <option value="Recurring">Recurring</option>
                     <option value="Search">Search</option>
                   </select>
-                  {/* Incomplete only checkbox */}
-                  <label className="flex items-center gap-2 text-gray-700 font-medium text-sm lg:text-base whitespace-nowrap">
-                    <input
-                      type="checkbox"
-                      checked={showIncompleteOnly}
-                      onChange={e => setShowIncompleteOnly(e.target.checked)}
-                      className="rounded focus:ring-2 focus:ring-green-500"
-                    />
-                    <span>Incomplete only</span>
-                  </label>
-                                                    {sortOption === 'Deadline' && (
+
+                  {/* Task Status Filter */}
+                  <div className="flex items-center gap-2 bg-white dark:bg-gray-700 rounded-xl p-1 shadow-sm border border-gray-200 dark:border-gray-600">
+                    <button
+                      onClick={() => setTaskStatusFilter('all')}
+                      className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-all duration-200 ${
+                        taskStatusFilter === 'all'
+                          ? 'bg-theme-primary text-white shadow-md'
+                          : 'text-gray-600 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200'
+                      }`}
+                    >
+                      All
+                    </button>
+                    <button
+                      onClick={() => setTaskStatusFilter('overdue')}
+                      className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-all duration-200 ${
+                        taskStatusFilter === 'overdue'
+                          ? 'bg-red-500 text-white shadow-md'
+                          : 'text-gray-600 dark:text-gray-400 hover:text-red-600 dark:hover:text-red-400'
+                      }`}
+                    >
+                      Overdue
+                    </button>
+                    <button
+                      onClick={() => setTaskStatusFilter('active')}
+                      className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-all duration-200 ${
+                        taskStatusFilter === 'active'
+                          ? 'bg-blue-500 text-white shadow-md'
+                          : 'text-gray-600 dark:text-gray-400 hover:text-blue-600 dark:hover:text-blue-400'
+                      }`}
+                    >
+                      Active
+                    </button>
+                    <button
+                      onClick={() => setTaskStatusFilter('urgent')}
+                      className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-all duration-200 ${
+                        taskStatusFilter === 'urgent'
+                          ? 'bg-orange-500 text-white shadow-md'
+                          : 'text-gray-600 dark:text-gray-400 hover:text-orange-600 dark:hover:text-orange-400'
+                      }`}
+                    >
+                      Urgent
+                    </button>
+                    <button
+                      onClick={() => setTaskStatusFilter('completed')}
+                      className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-all duration-200 ${
+                        taskStatusFilter === 'completed'
+                          ? 'bg-green-500 text-white shadow-md'
+                          : 'text-gray-600 dark:text-gray-400 hover:text-green-600 dark:hover:text-green-400'
+                      }`}
+                    >
+                      Completed
+                    </button>
+                  </div>
+                  {sortOption === 'Deadline' && (
                     <div className="flex flex-col sm:flex-row gap-2 w-full">
                       <input
                         type="text"
                         placeholder="Year"
                         value={filterYear}
                         onChange={(e) => setFilterYear(e.target.value)}
-                        className="px-2 lg:px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-gray-400 focus:border-transparent w-full sm:w-16 lg:w-20 text-sm"
+                        className="px-3 py-2 border border-gray-200 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-theme-primary focus:border-transparent bg-white dark:bg-gray-700 text-gray-900 dark:text-white w-full sm:w-20 text-sm"
                       />
                       <input
                         type="text"
                         placeholder="Month"
                         value={filterMonth}
                         onChange={(e) => setFilterMonth(e.target.value)}
-                        className="px-2 lg:px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-gray-400 focus:border-transparent w-full sm:w-20 lg:w-24 text-sm"
+                        className="px-3 py-2 border border-gray-200 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-theme-primary focus:border-transparent bg-white dark:bg-gray-700 text-gray-900 dark:text-white w-full sm:w-24 text-sm"
                       />
                       <input
                         type="text"
                         placeholder="Day"
                         value={filterDay}
                         onChange={(e) => setFilterDay(e.target.value)}
-                        className="px-2 lg:px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-gray-400 focus:border-transparent w-full sm:w-14 lg:w-16 text-sm"
+                        className="px-3 py-2 border border-gray-200 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-theme-primary focus:border-transparent bg-white dark:bg-gray-700 text-gray-900 dark:text-white w-full sm:w-16 text-sm"
                       />
                     </div>
                   )}
@@ -933,7 +1031,7 @@ function App() {
                     <select
                       value={filterValue}
                       onChange={(e) => setFilterValue(e.target.value)}
-                      className="px-3 lg:px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-gray-400 focus:border-transparent text-sm lg:text-base w-full sm:w-auto min-w-[180px] lg:min-w-[200px]"
+                      className="px-3 py-2 border border-gray-200 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-theme-primary focus:border-transparent bg-white dark:bg-gray-700 text-gray-900 dark:text-white text-sm w-full sm:w-auto min-w-[200px]"
                     >
                       <option value="">Select responsible party...</option>
                       {uniqueResponsibleParties.map(party => (
@@ -945,7 +1043,7 @@ function App() {
                     <select
                       value={filterValue}
                       onChange={(e) => setFilterValue(e.target.value)}
-                      className="px-3 lg:px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-gray-400 focus:border-transparent text-sm lg:text-base w-full sm:w-auto min-w-[180px] lg:min-w-[200px]"
+                      className="px-3 py-2 border border-gray-200 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-theme-primary focus:border-transparent bg-white dark:bg-gray-700 text-gray-900 dark:text-white text-sm w-full sm:w-auto min-w-[200px]"
                     >
                       <option value="">Select project...</option>
                       {uniqueProjectNames.map(project => (
@@ -957,7 +1055,7 @@ function App() {
                     <select
                       value={filterValue}
                       onChange={(e) => setFilterValue(e.target.value)}
-                      className="px-3 lg:px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-gray-400 focus:border-transparent text-sm lg:text-base w-full sm:w-auto min-w-[180px] lg:min-w-[200px]"
+                      className="px-3 py-2 border border-gray-200 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-theme-primary focus:border-transparent bg-white dark:bg-gray-700 text-gray-900 dark:text-white text-sm w-full sm:w-auto min-w-[200px]"
                     >
                       <option value="">Select type...</option>
                       <option value="Recurring">Recurring</option>
@@ -970,7 +1068,7 @@ function App() {
                       placeholder="Search tasks..."
                       value={filterValue}
                       onChange={(e) => setFilterValue(e.target.value)}
-                      className="px-3 lg:px-4 py-2 border-2 border-gray-400 rounded-lg focus:ring-2 focus:ring-gray-400 focus:border-transparent w-full text-sm lg:text-base"
+                      className="px-3 py-2 border-2 border-gray-200 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-theme-primary focus:border-transparent bg-white dark:bg-gray-700 text-gray-900 dark:text-white w-full text-sm"
                       autoFocus
                     />
                   )}
@@ -987,15 +1085,23 @@ function App() {
               </div>
             </div>
 
-            <div className="grid gap-6 mt-6">
+            {/* Sleek task list container */}
+            <div className="relative bg-white dark:bg-gray-700 rounded-2xl p-6 shadow-lg border border-gray-200 dark:border-gray-600">
               {filteredTasks.length === 0 ? (
-                <div className="flex flex-col items-center justify-center py-24 text-gray-500">
-                  <svg className="w-20 h-20 mb-4 text-gray-300" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
-                  <div className="text-2xl font-bold mb-2 text-gray-700">No tasks found</div>
-                  <div className="text-base text-gray-500">Try adjusting your filters or search.</div>
+                <div className="flex flex-col items-center justify-center py-16 text-gray-500">
+                  <div className="w-16 h-16 bg-gray-100 dark:bg-gray-600 rounded-full flex items-center justify-center mx-auto mb-4">
+                    <svg className="w-8 h-8 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v10a2 2 0 002 2h8a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
+                    </svg>
+                  </div>
+                  <h4 className="text-lg font-semibold text-gray-700 dark:text-gray-300 mb-2">No tasks found</h4>
+                  <p className="text-gray-500 dark:text-gray-400 text-center">
+                    No tasks match your current filters. Try adjusting your search criteria.
+                  </p>
                 </div>
               ) : (
-                filteredTasks.map(task => {
+                <div className="space-y-4">
+                  {filteredTasks.map(task => {
                   const today = new Date();
                   const deadlineDate = parseDeadlineDate(task.deadline);
                   const completed = !!task.completed;
@@ -1015,8 +1121,10 @@ function App() {
                         badge: 'bg-green-100 dark:bg-green-900/30 text-green-800 dark:text-green-200',
                         text: 'text-green-800 dark:text-green-200',
                         icon: 'text-green-600 dark:text-green-400',
-                        dateBg: '#d1fae5',
-                        dateColor: '#065f46'
+                        dateBg: '#10b981',
+                        dateColor: '#ffffff',
+                        cardBg: '#f0fdf4',
+                        cardBorder: '#10b981'
                       };
                     } else if (daysDiff !== null && daysDiff < 0) {
                       return {
@@ -1025,8 +1133,10 @@ function App() {
                         badge: 'bg-red-100 dark:bg-red-900/30 text-red-800 dark:text-red-200',
                         text: 'text-red-800 dark:text-red-200',
                         icon: 'text-red-600 dark:text-red-400',
-                        dateBg: '#fee2e2',
-                        dateColor: '#991b1b'
+                        dateBg: '#ef4444',
+                        dateColor: '#ffffff',
+                        cardBg: '#fef2f2',
+                        cardBorder: '#ef4444'
                       };
                     } else if (daysDiff !== null && daysDiff === 0) {
                       return {
@@ -1035,8 +1145,10 @@ function App() {
                         badge: 'bg-red-100 dark:bg-red-900/30 text-red-800 dark:text-red-200',
                         text: 'text-red-800 dark:text-red-200',
                         icon: 'text-red-600 dark:text-red-400',
-                        dateBg: '#fca5a5',
-                        dateColor: '#991b1b'
+                        dateBg: '#dc2626',
+                        dateColor: '#ffffff',
+                        cardBg: '#fef2f2',
+                        cardBorder: '#dc2626'
                       };
                     } else if (daysDiff !== null && daysDiff <= 3) {
                       return {
@@ -1045,8 +1157,10 @@ function App() {
                         badge: 'bg-orange-100 dark:bg-orange-900/30 text-orange-800 dark:text-orange-200',
                         text: 'text-orange-800 dark:text-orange-200',
                         icon: 'text-orange-600 dark:text-orange-400',
-                        dateBg: '#fef3c7',
-                        dateColor: '#92400e'
+                        dateBg: '#f59e0b',
+                        dateColor: '#ffffff',
+                        cardBg: '#fffbeb',
+                        cardBorder: '#f59e0b'
                       };
                     } else {
                       return {
@@ -1055,8 +1169,10 @@ function App() {
                         badge: 'bg-blue-100 dark:bg-blue-900/30 text-blue-800 dark:text-blue-200',
                         text: 'text-blue-800 dark:text-blue-200',
                         icon: 'text-blue-600 dark:text-blue-400',
-                        dateBg: '#dbeafe',
-                        dateColor: '#1e40af'
+                        dateBg: '#3b82f6',
+                        dateColor: '#ffffff',
+                        cardBg: '#eff6ff',
+                        cardBorder: '#3b82f6'
                       };
                     }
                   };
@@ -1074,195 +1190,207 @@ function App() {
                   }
                   
                   return (
-                    <div key={task.instanceId} className={`group relative flex flex-col lg:flex-row items-stretch bg-white dark:bg-gray-800 rounded-xl border-2 transition-all duration-300 hover:shadow-lg hover:scale-[1.02] hover:border-opacity-80 overflow-hidden`}
-                      style={{
-                        borderColor: status.dateBg
-                      }}
-                    >
-                      {/* Date and status panel - Left side */}
-                      <div className="flex flex-row lg:flex-col items-center justify-center w-full lg:w-20 lg:min-w-[5rem] lg:h-auto py-2 lg:py-3 px-2 lg:px-1 rounded-t-xl lg:rounded-l-xl lg:rounded-t-none transition-all duration-300"
-                        style={{
-                          background: status.dateBg,
-                          color: status.dateColor
-                        }}
-                      >
-                        <div className="flex flex-row lg:flex-col items-center">
-                          <span className="text-sm font-bold tracking-tight lg:mb-0.5 uppercase mr-1 lg:mr-0">
-                            {deadlineDate ? deadlineDate.toLocaleString('en-US', { month: 'short' }) : ''}
-                          </span>
-                          <span className="text-xl lg:text-2xl font-extrabold leading-none uppercase mr-1 lg:mr-0">
-                            {deadlineDate ? deadlineDate.getDate() : ''}
-                          </span>
-                          <span className="text-sm lg:mt-0.5 uppercase">
-                            {deadlineDate ? deadlineDate.getFullYear() : ''}
-                          </span>
-                        </div>
-                      </div>
-                      
-                      {/* Main content - Right side */}
-                      <div className={`flex-1 flex flex-col justify-center p-2 lg:p-3 ${status.bg}`}>
-                        {/* Header with task description and status */}
-                        <div className="flex items-center justify-between mb-2">
-                          <div className="flex-1 min-w-0">
-                            <h3 className={`text-base lg:text-lg font-bold ${completed ? 'line-through opacity-75' : 'text-gray-900 dark:text-white'} transition-all duration-200 group-hover:text-opacity-90`}>
-                              {task.description}
-                            </h3>
-                          </div>
-                          <div className="flex items-center gap-1.5 ml-2">
-                            {/* Status badge */}
-                            <span className={`px-2 py-1 rounded-full text-sm font-bold tracking-wide uppercase shadow-sm ${status.badge}`}>
-                              {dueText}
-                            </span>
-                            
-                            {/* Urgent badge */}
-                            {task.important && (
-                              <span className="px-2 py-1 rounded-full text-sm font-bold tracking-wide uppercase shadow-sm bg-orange-100 dark:bg-orange-900/30 text-orange-800 dark:text-orange-200">
-                                URGENT
-                              </span>
-                            )}
-                          </div>
-                        </div>
+                    <div key={task.instanceId} className={`group relative flex overflow-hidden rounded-xl transition-all duration-300 hover:scale-[1.02] hover:shadow-2xl dark:shadow-gray-900/20`} style={{
+                      background: completed
+                        ? `linear-gradient(135deg, #f0fdf4 0%, #dcfce7 30%, #bbf7d0 70%, #10b981 100%)`
+                        : (task.important 
+                          ? `linear-gradient(135deg, #fffbeb 0%, #fef3c7 30%, #fde68a 70%, #f59e0b 100%)`
+                          : (daysDiff !== null && daysDiff < 0
+                            ? `linear-gradient(135deg, #fef2f2 0%, #fecaca 30%, #fca5a5 70%, #ef4444 100%)`
+                            : (daysDiff !== null && daysDiff === 0
+                              ? `linear-gradient(135deg, #fef2f2 0%, #fecaca 30%, #fca5a5 70%, #dc2626 100%)`
+                              : (daysDiff !== null && daysDiff <= 3
+                                ? `linear-gradient(135deg, #fffbeb 0%, #fed7aa 30%, #fdba74 70%, #f59e0b 100%)`
+                                : `linear-gradient(135deg, #eff6ff 0%, #dbeafe 30%, #bfdbfe 70%, #3b82f6 100%)`)))),
+                      boxShadow: `0 4px 20px rgba(0,0,0,0.08), 0 1px 3px rgba(0,0,0,0.1), inset 0 1px 0 rgba(255,255,255,0.3)`,
+                      filter: 'var(--tw-brightness) var(--tw-contrast) var(--tw-grayscale) var(--tw-hue-rotate) var(--tw-invert) var(--tw-saturate) var(--tw-sepia) var(--tw-drop-shadow)'
+                    }}>
+                      {/* Date Section (Left) - Modern Gradient */}
+                      <div className={`relative flex-shrink-0 w-20 rounded-l-xl flex flex-col overflow-hidden`} style={{ 
+                        background: completed
+                          ? `linear-gradient(135deg, #10b981 0%, #059669 30%, #047857 70%, #065f46 100%)`
+                          : (task.important 
+                            ? `linear-gradient(135deg, #ea580c 0%, #f97316 30%, #fb923c 70%, #f59e0b 100%)`
+                            : (daysDiff !== null && daysDiff < 0
+                              ? `linear-gradient(135deg, #ef4444 0%, #dc2626 30%, #b91c1c 70%, #991b1b 100%)`
+                              : (daysDiff !== null && daysDiff === 0
+                                ? `linear-gradient(135deg, #dc2626 0%, #b91c1c 30%, #991b1b 70%, #7f1d1d 100%)`
+                                : (daysDiff !== null && daysDiff <= 3
+                                  ? `linear-gradient(135deg, #f59e0b 0%, #d97706 30%, #b45309 70%, #92400e 100%)`
+                                  : `linear-gradient(135deg, #3b82f6 0%, #2563eb 30%, #1d4ed8 70%, #1e40af 100%)`)))),
+                        boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.3), 2px 0 8px rgba(0,0,0,0.1)'
+                      }}>
+                        {/* Subtle overlay for depth */}
+                        <div className="absolute inset-0 bg-gradient-to-br from-white/10 to-transparent"></div>
                         
-                        {/* Project and responsible party info - compact */}
-                        <div className="flex items-center gap-3 text-sm mb-2">
-                          <div className="flex items-center gap-1">
-                            <svg className={`w-4 h-4 ${status.icon}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
-                            </svg>
-                            <span className="font-medium text-gray-600 dark:text-gray-400">Project:</span>
-                            <span className="font-semibold text-gray-800 dark:text-gray-200">{task.projectName}</span>
-                          </div>
-                          
-                          <div className="flex items-center gap-1">
-                            <svg className={`w-4 h-4 ${status.icon}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
-                            </svg>
-                            <span className="font-medium text-gray-600 dark:text-gray-400">Responsible:</span>
-                            <span className="font-semibold text-gray-800 dark:text-gray-200">{task.responsibleParty}</span>
-                          </div>
-                        </div>
-                        
-                        {/* Notes section */}
-                        {task.notes && (
-                          <div className={`mb-2 p-2 rounded-lg border-l-4 ${
-                            completed 
-                              ? 'border-green-500 dark:border-green-400' 
-                              : daysDiff !== null && daysDiff < 0
-                              ? 'border-red-500 dark:border-red-400'
-                              : daysDiff !== null && daysDiff === 0
-                              ? 'border-red-500 dark:border-red-400'
-                              : daysDiff !== null && daysDiff <= 3
-                              ? 'border-orange-500 dark:border-orange-400'
-                              : 'border-blue-500 dark:border-blue-400'
-                          }`}>
-                            <div className="flex items-start gap-2">
-                              <svg className={`w-4 h-4 mt-0.5 flex-shrink-0 ${
-                                completed 
-                                  ? 'text-green-600 dark:text-green-400' 
-                                  : daysDiff !== null && daysDiff < 0
-                                  ? 'text-red-600 dark:text-red-400'
-                                  : daysDiff !== null && daysDiff === 0
-                                  ? 'text-red-600 dark:text-red-400'
-                                  : daysDiff !== null && daysDiff <= 3
-                                  ? 'text-orange-600 dark:text-orange-400'
-                                  : 'text-blue-600 dark:text-blue-400'
-                              }`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
-                              </svg>
-                              <div className={`text-sm ${
-                                completed 
-                                  ? 'text-green-800 dark:text-green-200' 
-                                  : daysDiff !== null && daysDiff < 0
-                                  ? 'text-red-800 dark:text-red-200'
-                                  : daysDiff !== null && daysDiff === 0
-                                  ? 'text-red-800 dark:text-red-200'
-                                  : daysDiff !== null && daysDiff <= 3
-                                  ? 'text-orange-800 dark:text-orange-200'
-                                  : 'text-blue-800 dark:text-blue-200'
-                              }`}>
-                                <span className="font-medium opacity-80">Notes:</span> {task.notes}
-                              </div>
+                        {/* Date content */}
+                        {deadlineDate && (
+                          <div className="relative z-10 flex flex-col items-center justify-center flex-1 p-2 text-center">
+                            <div className="text-xs font-bold text-white/95 uppercase tracking-wider mb-1 drop-shadow-sm">
+                              {deadlineDate.toLocaleDateString('en-US', { month: 'short' })}
+                            </div>
+                            <div className="text-2xl font-black text-white leading-none drop-shadow-sm">
+                              {deadlineDate.getDate()}
+                            </div>
+                            <div className="text-xs font-semibold text-white/85 mt-1 drop-shadow-sm">
+                              {deadlineDate.getFullYear()}
                             </div>
                           </div>
                         )}
+                      </div>
+                      
+                      {/* Info Section (Right) - Modern Design */}
+                      <div className={`flex-1 rounded-r-xl relative overflow-hidden`} style={{ 
+                        background: completed
+                          ? `linear-gradient(135deg, #f0fdf4 0%, #dcfce7 30%, #bbf7d0 70%, #10b981 100%)`
+                          : (task.important 
+                            ? `linear-gradient(135deg, #fffbeb 0%, #fef3c7 30%, #fde68a 70%, #f59e0b 100%)`
+                            : (daysDiff !== null && daysDiff < 0
+                              ? `linear-gradient(135deg, #fef2f2 0%, #fecaca 30%, #fca5a5 70%, #ef4444 100%)`
+                              : (daysDiff !== null && daysDiff === 0
+                                ? `linear-gradient(135deg, #fef2f2 0%, #fecaca 30%, #fca5a5 70%, #dc2626 100%)`
+                                : (daysDiff !== null && daysDiff <= 3
+                                  ? `linear-gradient(135deg, #fffbeb 0%, #fed7aa 30%, #fdba74 70%, #f59e0b 100%)`
+                                  : `linear-gradient(135deg, #eff6ff 0%, #dbeafe 30%, #bfdbfe 70%, #3b82f6 100%)`))))
+                      }}>
+                        {/* Subtle pattern overlay */}
+                        <div className="absolute inset-0 bg-gradient-to-br from-white/10 to-transparent dark:from-gray-800/30"></div>
                         
-                        {/* Action buttons */}
-                        <div className="flex justify-end gap-1.5">
-                          {hasPermission(ROLES.EDITOR) && (
-                            <button
-                              onClick={() => handleEditClick(task)}
-                              className="w-8 h-8 flex items-center justify-center rounded-full bg-blue-600 hover:bg-blue-700 text-white shadow-sm hover:shadow-md transition-all duration-200 transform hover:scale-105"
-                              title="Edit Task"
-                            >
-                              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                        {/* Info content */}
+                        <div className="relative z-10 p-3">
+                          {/* Header with title and status badges */}
+                          <div className="flex items-start justify-between mb-3">
+                            <div className="flex-1 min-w-0">
+                              <h3 className={`text-base font-bold ${completed ? 'line-through opacity-75' : 'text-gray-900 dark:text-gray-800'} transition-all duration-200 group-hover:text-opacity-90`}>
+                                {task.description}
+                              </h3>
+                            </div>
+                            <div className="flex items-center gap-1.5 ml-3">
+                              {/* Status badge (Due/Completed) */}
+                              <span className={`px-2 py-1 rounded-full text-xs font-bold tracking-wide uppercase shadow-sm ${completed ? 'bg-green-600 text-white' : (task.important ? 'bg-orange-600 text-white' : status.badge)}`}>
+                                {dueText}
+                              </span>
+                              
+                              {/* Urgent badge */}
+                              {task.important && !completed && (
+                                <span className="px-2 py-1 rounded-full text-xs font-bold tracking-wide uppercase shadow-sm bg-orange-600 text-white">
+                                  URGENT
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                          
+                          {/* Project and responsible party info - compact */}
+                          <div className="space-y-1.5 mb-2">
+                            <div className="flex items-center gap-2 text-xs">
+                              <svg className={`w-3.5 h-3.5 ${completed ? 'text-green-700 dark:text-green-700' : (task.important ? 'text-orange-700 dark:text-orange-700' : status.icon)}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
                               </svg>
-                            </button>
+                              <span className="font-medium text-gray-600 dark:text-gray-800">Project:</span>
+                              <span className="font-semibold text-gray-800 dark:text-gray-900">{task.projectName}</span>
+                            </div>
+                            
+                            <div className="flex items-center gap-2 text-xs">
+                              <svg className={`w-3.5 h-3.5 ${completed ? 'text-green-700 dark:text-green-700' : (task.important ? 'text-orange-700 dark:text-orange-700' : status.icon)}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+                              </svg>
+                              <span className="font-medium text-gray-600 dark:text-gray-800">Responsible:</span>
+                              <span className="font-semibold text-gray-800 dark:text-gray-900">{task.responsibleParty}</span>
+                            </div>
+                          </div>
+                          
+                          {/* Notes section - transparent background */}
+                          {task.notes && (
+                            <div className="mb-2">
+                              <div className="flex items-start gap-2">
+                                <svg className={`w-3.5 h-3.5 mt-0.5 flex-shrink-0 ${completed ? 'text-green-700 dark:text-green-700' : (task.important ? 'text-orange-700 dark:text-orange-700' : status.icon)}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+                                </svg>
+                                <div className={`text-xs ${completed ? 'text-green-800 dark:text-green-800' : (task.important ? 'text-orange-800 dark:text-orange-800' : (daysDiff !== null && daysDiff < 0 ? 'text-red-800 dark:text-red-800' : (daysDiff !== null && daysDiff === 0 ? 'text-red-800 dark:text-red-800' : (daysDiff !== null && daysDiff <= 3 ? 'text-orange-800 dark:text-orange-800' : 'text-blue-800 dark:text-blue-800'))))} font-medium`}>
+                                  <span className="font-semibold">Notes:</span> {task.notes}
+                                </div>
+                              </div>
+                            </div>
                           )}
                           
-                          <button
-                            onClick={() => handleToggleCompleted(task.instanceId, task.originalId)}
-                            className={`w-8 h-8 flex items-center justify-center rounded-full transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-theme-primary shadow-sm hover:shadow-md transform hover:scale-105 ${
-                              completed 
-                                ? 'bg-green-500 text-white hover:bg-green-600 shadow-green-200 dark:shadow-green-900/30' 
-                                : 'bg-white dark:bg-gray-700 text-gray-600 dark:text-gray-300 hover:text-green-600 dark:hover:text-green-400 border border-gray-200 dark:border-gray-600'
-                            }`}
-                            title={completed ? 'Mark as Incomplete' : 'Mark as Completed'}
-                            aria-label={completed ? 'Mark as Incomplete' : 'Mark as Completed'}
-                          >
-                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M4.5 12.75l6 6 9-13.5" />
-                            </svg>
-                          </button>
-                          
-                          {hasPermission(ROLES.EDITOR) && (
+                          {/* Action buttons - Modern Design */}
+                          <div className="flex justify-end gap-2">
+                            {hasPermission(ROLES.EDITOR) && (
+                              <button
+                                onClick={() => handleEditClick(task)}
+                                className="w-8 h-8 flex items-center justify-center rounded-xl bg-blue-500 hover:bg-blue-600 text-white shadow-lg hover:shadow-xl transition-all duration-200 transform hover:scale-110"
+                                title="Edit Task"
+                              >
+                                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                                </svg>
+                              </button>
+                            )}
+                            
                             <button
-                              onClick={() => handleToggleUrgent(task.instanceId, task.originalId)}
-                              className={`w-8 h-8 flex items-center justify-center rounded-full transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-theme-primary shadow-sm hover:shadow-md transform hover:scale-105 ${
-                                task.important 
-                                  ? 'bg-orange-500 text-white hover:bg-orange-600 shadow-orange-200 dark:shadow-orange-900/30' 
-                                  : 'bg-white dark:bg-gray-700 text-gray-600 dark:text-gray-300 hover:text-orange-600 dark:hover:text-orange-400 border border-gray-200 dark:border-gray-600'
+                              onClick={() => handleToggleCompleted(task.instanceId, task.originalId)}
+                              className={`w-8 h-8 flex items-center justify-center rounded-xl transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-theme-primary shadow-lg hover:shadow-xl transform hover:scale-110 ${
+                                completed 
+                                  ? 'bg-green-500 text-white hover:bg-green-600' 
+                                  : 'bg-white/90 dark:bg-gray-700/90 text-gray-600 dark:text-gray-300 hover:text-green-600 dark:hover:text-green-400 hover:bg-green-50 dark:hover:bg-green-900/20 border border-gray-200/50 dark:border-gray-600/50'
                               }`}
-                              title={task.important ? 'Remove Urgent' : 'Mark as Urgent'}
+                              title={completed ? 'Mark as Incomplete' : 'Mark as Completed'}
                             >
                               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M4.5 12.75l6 6 9-13.5" />
                               </svg>
                             </button>
-                          )}
-                          
-                          {hasPermission(ROLES.EDITOR) && (
-                            <button
-                              onClick={() => handleToggleNotes(task.instanceId, task.originalId, task.notes)}
-                              className={`w-8 h-8 flex items-center justify-center rounded-full transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-theme-primary shadow-sm hover:shadow-md transform hover:scale-105 ${
-                                task.notes 
-                                  ? 'bg-yellow-500 text-white hover:bg-yellow-600 shadow-yellow-200 dark:shadow-yellow-900/30' 
-                                  : 'bg-white dark:bg-gray-700 text-gray-600 dark:text-gray-300 hover:text-yellow-600 dark:hover:text-yellow-400 border border-gray-200 dark:border-gray-600'
-                              }`}
-                              title={task.notes ? 'Edit Notes' : 'Add Notes'}
-                            >
-                              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
-                              </svg>
-                            </button>
-                          )}
-                          
-                          {hasPermission(ROLES.EDITOR) && (
-                            <button
-                              onClick={() => handleDeleteTask(task.instanceId, task.originalId)}
-                              className="w-8 h-8 flex items-center justify-center rounded-full bg-red-600 hover:bg-red-700 text-white shadow-sm hover:shadow-md transition-all duration-200 transform hover:scale-105"
-                              title="Delete Task"
-                            >
-                              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                              </svg>
-                            </button>
-                          )}
+                            
+                            {hasPermission(ROLES.EDITOR) && (
+                              <button
+                                onClick={() => handleToggleUrgent(task.instanceId, task.originalId)}
+                                className={`w-8 h-8 flex items-center justify-center rounded-xl transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-theme-primary shadow-lg hover:shadow-xl transform hover:scale-110 ${
+                                  task.important 
+                                    ? 'bg-orange-500 text-white hover:bg-orange-600' 
+                                    : 'bg-white/90 dark:bg-gray-700/90 text-gray-600 dark:text-gray-300 hover:text-orange-600 dark:hover:text-orange-400 hover:bg-orange-50 dark:hover:bg-orange-900/20 border border-gray-200/50 dark:border-gray-600/50'
+                                }`}
+                                title={task.important ? 'Remove Urgent' : 'Mark as Urgent'}
+                              >
+                                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                </svg>
+                              </button>
+                            )}
+                            
+                            {hasPermission(ROLES.EDITOR) && (
+                              <button
+                                onClick={() => handleToggleNotes(task.instanceId, task.originalId, task.notes)}
+                                className={`w-8 h-8 flex items-center justify-center rounded-xl transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-theme-primary shadow-lg hover:shadow-xl transform hover:scale-110 ${
+                                  task.notes 
+                                    ? 'bg-yellow-500 text-white hover:bg-yellow-600' 
+                                    : 'bg-white/90 dark:bg-gray-700/90 text-gray-600 dark:text-gray-300 hover:text-yellow-600 dark:hover:text-yellow-400 hover:bg-yellow-50 dark:hover:bg-yellow-900/20 border border-gray-200/50 dark:border-gray-600/50'
+                                }`}
+                                title={task.notes ? 'Edit Notes' : 'Add Notes'}
+                              >
+                                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+                                </svg>
+                              </button>
+                            )}
+                            
+                            {hasPermission(ROLES.EDITOR) && (
+                              <button
+                                onClick={() => handleDeleteTask(task.instanceId, task.originalId)}
+                                className="w-8 h-8 flex items-center justify-center rounded-xl bg-red-500 hover:bg-red-600 text-white shadow-lg hover:shadow-xl transition-all duration-200 transform hover:scale-110"
+                                title="Delete Task"
+                              >
+                                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                                </svg>
+                              </button>
+                            )}
+                          </div>
                         </div>
                       </div>
                     </div>
                   );
-                })
+                })}
+                </div>
               )}
             </div>
           </>
