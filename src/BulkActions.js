@@ -19,7 +19,7 @@ function BulkActions({ tasks, onBulkAction, onSelectAll, onClearSelection }) {
   };
 
   const handleSelectAll = () => {
-    const allTaskIds = tasks.map(task => task.id);
+    const allTaskIds = tasks.map(task => task.instanceId);
     setSelectedTasks(new Set(allTaskIds));
     setShowBulkBar(true);
     onSelectAll?.(allTaskIds);
