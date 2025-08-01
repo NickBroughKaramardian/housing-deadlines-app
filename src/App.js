@@ -1261,7 +1261,7 @@ function App() {
                           {/* Header with title and status badges */}
                           <div className="flex items-start justify-between mb-3">
                             <div className="flex-1 min-w-0">
-                              <h3 className={`text-base font-bold ${completed ? 'line-through opacity-75' : 'text-gray-900 dark:text-gray-800'} transition-all duration-200 group-hover:text-opacity-90`}>
+                              <h3 className={`text-base font-bold ${completed ? 'line-through opacity-75 text-gray-900 dark:text-gray-800' : 'text-gray-900 dark:text-gray-800'} transition-all duration-200 group-hover:text-opacity-90`}>
                                 {task.description}
                               </h3>
                             </div>
