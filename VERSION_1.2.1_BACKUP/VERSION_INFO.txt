@@ -1,0 +1,3 @@
+Version: 1.2.1
+Backup Date: 2025-08-16T18:44:06.698Z
+Description: Fixed dark mode slider initialization and updated version

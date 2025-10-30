@@ -1,0 +1,14 @@
+{
+  "name": "cc-project-manager-migration",
+  "version": "1.0.0",
+  "description": "Migration script from SharePoint to Azure SQL",
+  "scripts": {
+    "migrate": "node migrate-from-sharepoint.js",
+    "test-connection": "node test-connection.js"
+  },
+  "dependencies": {
+    "mssql": "^10.0.0",
+    "@microsoft/microsoft-graph-client": "^3.0.0",
+    "@azure/identity": "^4.0.0"
+  }
+}

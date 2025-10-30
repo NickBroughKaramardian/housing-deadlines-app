@@ -1,0 +1,252 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* CSS Custom Properties for Theme Colors */
+:root {
+  /* Theme colors - will be set by JavaScript */
+  --color-primary: #059669;
+  --color-primary-hover: #047857;
+  --color-primary-light: #d1fae5;
+  --color-primary-dark: #065f46;
+  --color-accent: #047857;
+  --color-accent-hover: #065f46;
+  --color-accent-light: #ecfdf5;
+  --color-accent-dark: #064e3b;
+  --color-success: #059669;
+  --color-warning: #f59e0b;
+  --color-error: #ef4444;
+  --color-info: #3b82f6;
+  
+  /* Dark mode specific colors */
+  --color-background: #ffffff;
+  --color-surface: #f9fafb;
+  --color-surface-hover: #f3f4f6;
+  --color-border: #e5e7eb;
+  --color-text: #111827;
+  --color-text-secondary: #6b7280;
+  --color-text-muted: #9ca3af;
+  --color-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px 0 rgba(0, 0, 0, 0.06);
+  --color-shadow-hover: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+}
+
+/* Dark mode overrides */
+.dark {
+  --color-background: #0f172a;
+  --color-surface: #1e293b;
+  --color-surface-hover: #334155;
+  --color-border: #334155;
+  --color-text: #f8fafc;
+  --color-text-secondary: #cbd5e1;
+  --color-text-muted: #64748b;
+  --color-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.3), 0 1px 2px 0 rgba(0, 0, 0, 0.2);
+  --color-shadow-hover: 0 4px 6px -1px rgba(0, 0, 0, 0.3), 0 2px 4px -1px rgba(0, 0, 0, 0.2);
+}
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
+    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background-color: var(--color-background);
+  color: var(--color-text);
+  transition: background-color 0.3s ease, color 0.3s ease;
+}
+
+#root {
+  min-height: 100vh;
+  background-color: var(--color-background);
+}
+
+.card, .panel, .modal {
+  background-color: var(--color-surface);
+  border-color: var(--color-border);
+  box-shadow: var(--color-shadow);
+}
+
+.badge {
+  background-color: var(--color-primary-light);
+  color: var(--color-primary-dark);
+  border-color: var(--color-primary);
+}
+
+input, select, textarea {
+  background-color: var(--color-surface);
+  border-color: var(--color-border);
+  color: var(--color-text);
+}
+
+button {
+  transition: all 0.2s ease;
+}
+
+/* Theme-aware utility classes */
+.bg-theme-primary {
+  background-color: var(--color-primary);
+}
+
+.bg-theme-primary-hover:hover {
+  background-color: var(--color-primary-hover);
+}
+
+.bg-theme-primary-light {
+  background-color: var(--color-primary-light);
+}
+
+.bg-theme-accent {
+  background-color: var(--color-accent);
+}
+
+.bg-theme-accent-hover:hover {
+  background-color: var(--color-accent-hover);
+}
+
+.text-theme-primary {
+  color: var(--color-primary);
+}
+
+.text-theme-primary-dark {
+  color: var(--color-primary-dark);
+}
+
+.text-theme-accent {
+  color: var(--color-accent);
+}
+
+.border-theme-primary {
+  border-color: var(--color-primary);
+}
+
+.border-theme-accent {
+  border-color: var(--color-accent);
+}
+
+.focus\:ring-theme-primary:focus {
+  --tw-ring-color: var(--color-primary);
+}
+
+.focus\:border-theme-primary:focus {
+  border-color: var(--color-primary);
+}
+
+/* Dark mode responsive adjustments */
+@media (max-width: 768px) {
+  body {
+    font-size: 14px;
+    line-height: 1.4;
+  }
+
+  button, input, select, textarea {
+    font-size: 16px; /* Prevents zoom on iOS */
+  }
+
+  .space-y-3 > * + * {
+    margin-top: 0.75rem;
+  }
+
+  .space-y-4 > * + * {
+    margin-top: 1rem;
+  }
+
+  input, select, textarea {
+    padding: 0.75rem;
+    border-radius: 0.5rem;
+  }
+
+  .modal {
+    margin: 1rem;
+    max-width: calc(100vw - 2rem);
+    max-height: calc(100vh - 2rem);
+  }
+}
+
+/* Focus styles for accessibility */
+button:focus, input:focus, select:focus, textarea:focus {
+  outline: none;
+}
+
+/* Remove all focus rings */
+*:focus {
+  outline: none !important;
+  box-shadow: none !important;
+  ring: none !important;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+.line-clamp-2 {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* Dark mode specific overrides */
+.dark .bg-white {
+  background-color: var(--color-surface);
+}
+
+.dark .bg-gray-50 {
+  background-color: var(--color-surface);
+}
+
+.dark .bg-gray-100 {
+  background-color: var(--color-surface-hover);
+}
+
+.dark .bg-gray-200 {
+  background-color: var(--color-border);
+}
+
+.dark .text-gray-700 {
+  color: var(--color-text-secondary);
+}
+
+.dark .text-gray-500 {
+  color: var(--color-text-muted);
+}
+
+.dark .text-gray-600 {
+  color: var(--color-text-secondary);
+}
+
+.dark .text-gray-800 {
+  color: var(--color-text);
+}
+
+.dark .text-gray-900 {
+  color: var(--color-text);
+}
+
+.dark .border-gray-200 {
+  border-color: var(--color-border);
+}
+
+.dark .border-gray-300 {
+  border-color: var(--color-border);
+}
+
+.dark .border-gray-100 {
+  border-color: var(--color-border);
+}
+
+.dark .shadow-md {
+  box-shadow: var(--color-shadow);
+}
+
+.dark .shadow-lg {
+  box-shadow: var(--color-shadow-hover);
+}
+
+.dark .shadow-sm {
+  box-shadow: var(--color-shadow);
+}
+
+/* Smooth transitions for theme changes */
+* {
+  transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease, box-shadow 0.3s ease;
+}

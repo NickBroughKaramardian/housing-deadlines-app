@@ -1,0 +1,130 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // This rule allows anyone with your Firestore database reference to view, edit,
+    // and delete all data in your Firestore database. It is useful for getting
+    // started, but it is configured to expire after 30 days because it
+    // leaves your app open to attackers. At that time, all client
+    // requests to your Firestore database will be denied.
+    //
+    // Make sure to write security rules for your app before that time, or else
+    // all client requests to your Firestore database will be denied until you Update
+    // your rules
+    match /{document=**} {
+      allow read, write: if request.time < timestamp.date(2025, 7, 29);
+    }
+
+    // Helper function to check if user is authenticated
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    // Helper function to get user profile
+    function getUserProfile() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid));
+    }
+    
+    // Helper function to check if user has required role
+    function hasRole(requiredRole) {
+      let userProfile = getUserProfile();
+      let roleHierarchy = {
+        'developer': 5,
+        'owner': 4,
+        'admin': 3,
+        'editor': 2,
+        'viewer': 1
+      };
+      return roleHierarchy[userProfile.data.role] >= roleHierarchy[requiredRole];
+    }
+
+    // Invites collection - anyone can read (for signup verification), only owners can create/update/delete
+    match /invites/{inviteId} {
+      allow read: if true; // Allow reading invites for signup verification
+      allow create, update, delete: if isAuthenticated() && hasRole('owner');
+    }
+
+    // Users collection - allow unauthenticated reads for email verification, authenticated users can manage their own profile
+    match /users/{userId} {
+      // Allow unauthenticated reads for email verification during login
+      allow read: if true;
+      // Allow creation and updates of user profiles during authentication (when uid matches auth.uid)
+      allow create, update: if isAuthenticated() && request.auth.uid == userId;
+      // Authenticated users can read/write their own profile
+      allow read, write: if isAuthenticated() && request.auth.uid == userId;
+      // Admins can read all users
+      allow read: if isAuthenticated() && hasRole('admin');
+      // Owners and developers can create new users (for invitations)
+      allow create: if isAuthenticated() && (hasRole('owner') || hasRole('developer'));
+      // Users with admin or higher roles can update/delete other users (except developers)
+      allow update, delete: if isAuthenticated() && (
+        hasRole('developer') || 
+        (hasRole('admin') && resource.data.role != 'developer') ||
+        (hasRole('owner') && resource.data.role != 'developer')
+      );
+    }
+
+    // Tasks collection - users can read/write tasks in their organization
+    match /tasks/{taskId} {
+      allow read: if isAuthenticated() && 
+        (resource.data.organizationId == getUserProfile().data.organizationId);
+      allow create: if isAuthenticated() && 
+        (request.resource.data.organizationId == getUserProfile().data.organizationId);
+      allow update, delete: if isAuthenticated() && 
+        (resource.data.organizationId == getUserProfile().data.organizationId);
+    }
+
+    // Task overrides collection - users can read/write overrides in their organization
+    match /taskOverrides/{overrideId} {
+      allow read: if isAuthenticated() && 
+        (resource.data.organizationId == getUserProfile().data.organizationId);
+      allow create: if isAuthenticated() && 
+        (request.resource.data.organizationId == getUserProfile().data.organizationId);
+      allow update, delete: if isAuthenticated() && 
+        (resource.data.organizationId == getUserProfile().data.organizationId);
+    }
+
+    // Messages collection - users can read messages sent to them or sent by them
+    match /messages/{messageId} {
+      allow read: if isAuthenticated() && 
+        (request.auth.uid in resource.data.recipients || 
+         resource.data.senderId == request.auth.uid);
+      allow create: if isAuthenticated();
+      allow update: if isAuthenticated() && 
+        (resource.data.senderId == request.auth.uid || 
+         request.auth.uid in resource.data.recipients);
+    }
+
+    // Checklist templates collection - users can read/write templates in their organization
+    match /checklistTemplates/{templateId} {
+      allow read: if isAuthenticated() && 
+        (resource.data.organizationId == getUserProfile().data.organizationId);
+      allow create: if isAuthenticated() && 
+        (request.resource.data.organizationId == getUserProfile().data.organizationId);
+      allow update, delete: if isAuthenticated() && 
+        (resource.data.organizationId == getUserProfile().data.organizationId);
+    }
+
+    // Checklists collection - users can read/write checklists in their organization
+    match /checklists/{checklistId} {
+      allow read: if isAuthenticated() && 
+        (resource.data.organizationId == getUserProfile().data.organizationId || 
+         !('organizationId' in resource.data));
+      allow create: if isAuthenticated() && 
+        (request.resource.data.organizationId == getUserProfile().data.organizationId);
+      allow update, delete: if isAuthenticated() && 
+        (resource.data.organizationId == getUserProfile().data.organizationId || 
+         !('organizationId' in resource.data));
+    }
+
+    // Department mappings collection - developers and owners can manage
+    match /departmentMappings/{mappingId} {
+      allow read: if isAuthenticated() && 
+        (resource.data.organizationId == getUserProfile().data.organizationId);
+      allow create, update, delete: if isAuthenticated() && 
+        ((hasRole('developer') || hasRole('owner')) && 
+         request.resource.data.organizationId == getUserProfile().data.organizationId);
+    }
+  }
+}

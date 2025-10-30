@@ -1,46 +1,41 @@
-const CACHE_NAME = 'cc-project-manager-v2';
-const STATIC_CACHE = 'cc-project-manager-static-v2';
-const DYNAMIC_CACHE = 'cc-project-manager-dynamic-v2';
+const CACHE_NAME = 'cc-project-manager-v5';
+const STATIC_CACHE = 'cc-project-manager-static-v5';
+const DYNAMIC_CACHE = 'cc-project-manager-dynamic-v5';
 
 // Files to cache immediately
 const urlsToCache = [
   '/',
   '/manifest.json',
   '/favicon.ico',
-  '/CC_App_Icon.svg',
-  '/apple-touch-icon.png',
-  '/logo192.png',
-  '/logo512.png'
+  '/CC_App_Icon.svg'
 ];
 
-// Install event - cache static assets
+// Install event - DISABLED CACHING
 self.addEventListener('install', (event) => {
-  event.waitUntil(
-    caches.open(STATIC_CACHE)
-      .then((cache) => {
-        console.log('Opened cache');
-        return cache.addAll(urlsToCache);
-      })
-  );
+  console.log('Service Worker: Caching DISABLED - forcing fresh loads');
+  // Skip caching entirely
+  self.skipWaiting();
 });
 
-// Activate event - clean up old caches
+// Activate event - CLEAR ALL CACHES
 self.addEventListener('activate', (event) => {
+  console.log('Service Worker: Clearing ALL caches');
   event.waitUntil(
     caches.keys().then((cacheNames) => {
       return Promise.all(
         cacheNames.map((cacheName) => {
-          if (cacheName !== STATIC_CACHE && cacheName !== DYNAMIC_CACHE) {
-            console.log('Deleting old cache:', cacheName);
-            return caches.delete(cacheName);
-          }
+          console.log('Deleting cache:', cacheName);
+          return caches.delete(cacheName);
         })
       );
+    }).then(() => {
+      console.log('Service Worker: All caches cleared');
+      return self.clients.claim();
     })
   );
 });
 
-// Fetch event - network first with cache fallback
+// Fetch event - DISABLED CACHING - ALWAYS NETWORK
 self.addEventListener('fetch', (event) => {
   const { request } = event;
   const url = new URL(request.url);
@@ -50,17 +45,14 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // Handle different types of requests
-  if (url.pathname.startsWith('/static/')) {
-    // Static assets - cache first
-    event.respondWith(cacheFirst(request));
-  } else if (url.pathname.startsWith('/api/')) {
-    // API calls - network first
-    event.respondWith(networkFirst(request));
-  } else {
-    // HTML pages - network first
-    event.respondWith(networkFirst(request));
+  // Skip chrome-extension and other unsupported schemes
+  if (url.protocol === 'chrome-extension:' || url.protocol === 'moz-extension:' || url.protocol === 'ms-browser-extension:') {
+    return;
   }
+
+  // ALWAYS use network - no caching
+  console.log('Service Worker: Bypassing cache for:', url.pathname);
+  event.respondWith(fetch(request));
 });
 
 // Cache first strategy for static assets

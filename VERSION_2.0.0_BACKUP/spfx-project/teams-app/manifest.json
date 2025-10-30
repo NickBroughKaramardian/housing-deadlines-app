@@ -1,0 +1,54 @@
+{
+  "$schema": "https://developer.microsoft.com/en-us/json-schemas/teams/v1.14/MicrosoftTeams.schema.json",
+  "manifestVersion": "1.14",
+  "version": "1.0.0",
+  "id": "cc-project-manager-spfx",
+  "packageName": "com.ccdev.projectmanager",
+  "developer": {
+    "name": "C&C Development",
+    "websiteUrl": "https://c-cdev.com",
+    "privacyUrl": "https://c-cdev.com/privacy",
+    "termsOfUseUrl": "https://c-cdev.com/terms"
+  },
+  "name": {
+    "short": "C&C Project Manager",
+    "full": "C&C Project Manager - SharePoint Framework"
+  },
+  "description": {
+    "short": "Project management tool integrated with SharePoint",
+    "full": "Manage project deadlines and tasks with full M365 integration"
+  },
+  "icons": {
+    "outline": "outline.png",
+    "color": "color.png"
+  },
+  "accentColor": "#6264A7",
+  "configurableTabs": [
+    {
+      "configurationUrl": "https://yourtenant.sharepoint.com/sites/ProjectManager/_layouts/15/TeamsLogon.aspx?SPFX=true&dest=/_layouts/15/teamshostedapp.aspx%3Fteams%26personal%26componentId=cc-project-manager-spfx",
+      "canUpdateConfiguration": true,
+      "scopes": [
+        "team",
+        "groupchat"
+      ]
+    }
+  ],
+  "staticTabs": [
+    {
+      "entityId": "cc-project-manager",
+      "name": "Project Manager",
+      "contentUrl": "https://yourtenant.sharepoint.com/sites/ProjectManager/_layouts/15/TeamsLogon.aspx?SPFX=true&dest=/_layouts/15/teamshostedapp.aspx%3Fteams%26personal%26componentId=cc-project-manager-spfx",
+      "websiteUrl": "https://yourtenant.sharepoint.com/sites/ProjectManager",
+      "scopes": [
+        "personal"
+      ]
+    }
+  ],
+  "permissions": [
+    "identity",
+    "messageTeamMembers"
+  ],
+  "validDomains": [
+    "yourtenant.sharepoint.com"
+  ]
+} 

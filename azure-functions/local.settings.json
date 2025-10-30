@@ -1,0 +1,11 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "FUNCTIONS_WORKER_RUNTIME": "node",
+    "AZURE_SQL_CONNECTION_STRING": "Server=tcp:your-server.database.windows.net,1433;Initial Catalog=ccprojectmanager;Authentication=Active Directory Default;Encrypt=True;",
+    "WEB_PUBSUB_CONNECTION_STRING": "Endpoint=https://your-webpubsub.webpubsub.azure.com;AccessKey=your-key;Version=1.0;",
+    "AZURE_CLIENT_ID": "your-client-id",
+    "AZURE_TENANT_ID": "your-tenant-id"
+  }
+}

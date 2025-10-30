@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Teams Icon Generator - C&C Project Manager</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            margin: 0;
+            padding: 20px;
+            min-height: 100vh;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
+        
+        .header {
+            background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+        
+        .header h1 {
+            margin: 0;
+            font-size: 2.5rem;
+            font-weight: 600;
+        }
+        
+        .header p {
+            margin: 10px 0 0 0;
+            opacity: 0.9;
+            font-size: 1.1rem;
+        }
+        
+        .content {
+            padding: 40px;
+        }
+        
+        .icon-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 30px;
+            margin-bottom: 40px;
+        }
+        
+        .icon-section {
+            background: #f8fafc;
+            border-radius: 12px;
+            padding: 25px;
+            border: 2px solid #e2e8f0;
+        }
+        
+        .icon-section h3 {
+            margin: 0 0 20px 0;
+            color: #1e293b;
+            font-size: 1.3rem;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        .icon-preview {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 20px 0;
+            padding: 20px;
+            background: white;
+            border-radius: 8px;
+            border: 1px solid #e2e8f0;
+        }
+        
+        .teams-icon {
+            width: 64px;
+            height: 64px;
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            font-size: 24px;
+            color: white;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            transition: all 0.3s ease;
+            cursor: pointer;
+        }
+        
+        .teams-icon:hover {
+            transform: scale(1.1);
+            box-shadow: 0 8px 24px rgba(0,0,0,0.2);
+        }
+        
+        .teams-icon.light {
+            background: linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%);
+        }
+        
+        .teams-icon.dark {
+            background: linear-gradient(135deg, #1e40af 0%, #1e3a8a 100%);
+        }
+        
+        .teams-icon.outline {
+            background: transparent;
+            border: 3px solid #3b82f6;
+            color: #3b82f6;
+        }
+        
+        .download-btn {
+            background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 8px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            margin: 5px;
+            font-size: 14px;
+        }
+        
+        .download-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 16px rgba(16, 185, 129, 0.3);
+        }
+        
+        .download-btn:active {
+            transform: translateY(0);
+        }
+        
+        .specs {
+            background: #f1f5f9;
+            border-radius: 8px;
+            padding: 15px;
+            margin-top: 15px;
+            font-size: 0.9rem;
+            color: #475569;
+        }
+        
+        .specs h4 {
+            margin: 0 0 10px 0;
+            color: #1e293b;
+        }
+        
+        .specs ul {
+            margin: 0;
+            padding-left: 20px;
+        }
+        
+        .specs li {
+            margin: 5px 0;
+        }
+        
+        .guidelines {
+            background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%);
+            border: 1px solid #f59e0b;
+            border-radius: 8px;
+            padding: 20px;
+            margin-top: 30px;
+        }
+        
+        .guidelines h3 {
+            margin: 0 0 15px 0;
+            color: #92400e;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        .guidelines ul {
+            margin: 0;
+            padding-left: 20px;
+            color: #92400e;
+        }
+        
+        .guidelines li {
+            margin: 8px 0;
+            line-height: 1.5;
+        }
+        
+        .canvas-container {
+            display: none;
+        }
+        
+        .icon-variants {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+            gap: 15px;
+            margin: 20px 0;
+        }
+        
+        .icon-variant {
+            text-align: center;
+            padding: 15px;
+            background: white;
+            border-radius: 8px;
+            border: 1px solid #e2e8f0;
+            transition: all 0.3s ease;
+        }
+        
+        .icon-variant:hover {
+            border-color: #3b82f6;
+            box-shadow: 0 4px 12px rgba(59, 130, 246, 0.1);
+        }
+        
+        .icon-variant .teams-icon {
+            width: 48px;
+            height: 48px;
+            font-size: 18px;
+            margin: 0 auto 10px auto;
+        }
+        
+        .icon-variant .label {
+            font-size: 0.8rem;
+            color: #64748b;
+            font-weight: 500;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🎯 Teams Icon Generator</h1>
+            <p>Create seamless, native-looking icons for Microsoft Teams</p>
+        </div>
+        
+        <div class="content">
+            <div class="icon-grid">
+                <!-- Color Icon -->
+                <div class="icon-section">
+                    <h3>🎨 Color Icon (192x192)</h3>
+                    <p>Primary app icon for Teams tabs and personal apps</p>
+                    
+                    <div class="icon-preview">
+                        <div class="teams-icon light" id="colorIcon">
+                            C&C
+                        </div>
+                    </div>
+                    
+                    <div class="icon-variants">
+                        <div class="icon-variant">
+                            <div class="teams-icon light">C&C</div>
+                            <div class="label">Primary</div>
+                        </div>
+                        <div class="icon-variant">
+                            <div class="teams-icon dark">C&C</div>
+                            <div class="label">Dark Mode</div>
+                        </div>
+                        <div class="icon-variant">
+                            <div class="teams-icon outline">C&C</div>
+                            <div class="label">Outline</div>
+                        </div>
+                    </div>
+                    
+                    <button class="download-btn" onclick="downloadIcon('color', 192)">Download 192x192</button>
+                    <button class="download-btn" onclick="downloadIcon('color', 96)">Download 96x96</button>
+                    
+                    <div class="specs">
+                        <h4>📋 Specifications:</h4>
+                        <ul>
+                            <li><strong>Format:</strong> PNG with transparency</li>
+                            <li><strong>Size:</strong> 192x192px (primary), 96x96px (fallback)</li>
+                            <li><strong>Style:</strong> Rounded corners (12px radius)</li>
+                            <li><strong>Colors:</strong> Teams blue gradient (#3b82f6 to #1d4ed8)</li>
+                            <li><strong>Text:</strong> White, bold, centered</li>
+                        </ul>
+                    </div>
+                </div>
+                
+                <!-- Outline Icon -->
+                <div class="icon-section">
+                    <h3>⚪ Outline Icon (32x32)</h3>
+                    <p>Small icon for Teams sidebar and navigation</p>
+                    
+                    <div class="icon-preview">
+                        <div class="teams-icon outline" id="outlineIcon" style="width: 32px; height: 32px; font-size: 12px;">
+                            C&C
+                        </div>
+                    </div>
+                    
+                    <div class="icon-variants">
+                        <div class="icon-variant">
+                            <div class="teams-icon outline" style="width: 24px; height: 24px; font-size: 10px;">C&C</div>
+                            <div class="label">Small</div>
+                        </div>
+                        <div class="icon-variant">
+                            <div class="teams-icon outline" style="width: 32px; height: 32px; font-size: 12px;">C&C</div>
+                            <div class="label">Standard</div>
+                        </div>
+                        <div class="icon-variant">
+                            <div class="teams-icon outline" style="width: 40px; height: 40px; font-size: 14px;">C&C</div>
+                            <div class="label">Large</div>
+                        </div>
+                    </div>
+                    
+                    <button class="download-btn" onclick="downloadIcon('outline', 32)">Download 32x32</button>
+                    <button class="download-btn" onclick="downloadIcon('outline', 24)">Download 24x24</button>
+                    
+                    <div class="specs">
+                        <h4>📋 Specifications:</h4>
+                        <ul>
+                            <li><strong>Format:</strong> PNG with transparency</li>
+                            <li><strong>Size:</strong> 32x32px (primary), 24x24px (fallback)</li>
+                            <li><strong>Style:</strong> Rounded corners (6px radius)</li>
+                            <li><strong>Colors:</strong> Teams blue outline (#3b82f6)</li>
+                            <li><strong>Background:</strong> Transparent</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Teams Design Guidelines -->
+            <div class="guidelines">
+                <h3>🎨 Microsoft Teams Icon Guidelines</h3>
+                <ul>
+                    <li><strong>Rounded Corners:</strong> Use 12px radius for 192x192, 6px for 32x32</li>
+                    <li><strong>Color Palette:</strong> Use Teams blue (#3b82f6) for consistency</li>
+                    <li><strong>Typography:</strong> Bold, clear text that's readable at small sizes</li>
+                    <li><strong>Transparency:</strong> Include transparent backgrounds for seamless integration</li>
+                    <li><strong>Lighting:</strong> Icons automatically get Teams' native lighting effects</li>
+                    <li><strong>Hover States:</strong> Teams applies automatic hover animations</li>
+                    <li><strong>Dark Mode:</strong> Icons automatically adapt to Teams' theme</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+    
+    <div class="canvas-container">
+        <canvas id="iconCanvas"></canvas>
+    </div>
+    
+    <script>
+        function downloadIcon(type, size) {
+            const canvas = document.getElementById('iconCanvas');
+            const ctx = canvas.getContext('2d');
+            
+            canvas.width = size;
+            canvas.height = size;
+            
+            // Clear canvas
+            ctx.clearRect(0, 0, size, size);
+            
+            // Set up styles based on type and size
+            const radius = size >= 96 ? 12 : 6;
+            const fontSize = Math.max(size * 0.25, 10);
+            
+            if (type === 'color') {
+                // Create gradient background
+                const gradient = ctx.createLinearGradient(0, 0, size, size);
+                gradient.addColorStop(0, '#3b82f6');
+                gradient.addColorStop(1, '#1d4ed8');
+                
+                // Draw rounded rectangle
+                ctx.fillStyle = gradient;
+                roundRect(ctx, 0, 0, size, size, radius);
+                ctx.fill();
+                
+                // Add text
+                ctx.fillStyle = 'white';
+                ctx.font = `bold ${fontSize}px 'Segoe UI', Arial, sans-serif`;
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText('C&C', size/2, size/2);
+                
+            } else if (type === 'outline') {
+                // Draw outline
+                ctx.strokeStyle = '#3b82f6';
+                ctx.lineWidth = Math.max(size * 0.08, 2);
+                roundRect(ctx, ctx.lineWidth/2, ctx.lineWidth/2, size - ctx.lineWidth, size - ctx.lineWidth, radius);
+                ctx.stroke();
+                
+                // Add text
+                ctx.fillStyle = '#3b82f6';
+                ctx.font = `bold ${fontSize}px 'Segoe UI', Arial, sans-serif`;
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText('C&C', size/2, size/2);
+            }
+            
+            // Download the icon
+            const link = document.createElement('a');
+            link.download = `cc-project-manager-${type}-${size}x${size}.png`;
+            link.href = canvas.toDataURL('image/png');
+            link.click();
+        }
+        
+        function roundRect(ctx, x, y, width, height, radius) {
+            ctx.beginPath();
+            ctx.moveTo(x + radius, y);
+            ctx.lineTo(x + width - radius, y);
+            ctx.quadraticCurveTo(x + width, y, x + width, y + radius);
+            ctx.lineTo(x + width, y + height - radius);
+            ctx.quadraticCurveTo(x + width, y + height, x + width - radius, y + height);
+            ctx.lineTo(x + radius, y + height);
+            ctx.quadraticCurveTo(x, y + height, x, y + height - radius);
+            ctx.lineTo(x, y + radius);
+            ctx.quadraticCurveTo(x, y, x + radius, y);
+            ctx.closePath();
+        }
+        
+        // Add hover effects to preview icons
+        document.querySelectorAll('.teams-icon').forEach(icon => {
+            icon.addEventListener('mouseenter', function() {
+                this.style.transform = 'scale(1.1) rotate(5deg)';
+                this.style.boxShadow = '0 8px 24px rgba(59, 130, 246, 0.3)';
+            });
+            
+            icon.addEventListener('mouseleave', function() {
+                this.style.transform = 'scale(1) rotate(0deg)';
+                this.style.boxShadow = '0 4px 12px rgba(0,0,0,0.15)';
+            });
+        });
+    </script>
+</body>
+</html> 
