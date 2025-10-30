@@ -87,3 +87,4 @@ All data is stored locally in the browser's localStorage, ensuring privacy and o
 - Papa Parse (CSV parsing)
 - SheetJS (Excel file parsing)
 - Heroicons (UI icons)
+ci: trigger
