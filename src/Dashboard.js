@@ -1,450 +1,632 @@
 import React, { useState, useEffect } from 'react';
-import { parse, isValid, isThisWeek, format, differenceInDays } from 'date-fns';
-import { db } from './firebase';
-import { collection, onSnapshot, query, where, orderBy, limit, updateDoc, doc } from 'firebase/firestore';
+import { globalTaskStore } from './globalTaskStore';
+import { parse, isValid, isThisWeek, format, differenceInDays, startOfYear, endOfYear, isWithinInterval } from 'date-fns';
+import { microsoftDataService } from './microsoftDataService';
 import { useAuth } from './Auth';
+import { 
+  CheckCircleIcon, 
+  ClockIcon, 
+  ExclamationTriangleIcon, 
+  CalendarDaysIcon,
+  ChartBarIcon,
+  BuildingOfficeIcon,
+  FolderIcon
+} from '@heroicons/react/24/outline';
+import TaskCard from './TaskCard';
+import taskSyncService from './taskSyncService';
 
-function Dashboard({ tasks, onToggleCompleted, onTaskLinkClick }) {
-  const { userProfile, hasPermission, ROLES } = useAuth();
-  const [recentMessages, setRecentMessages] = useState([]);
-  const [notes, setNotes] = useState([]);
-  const [newNote, setNewNote] = useState('');
-  const [editingNoteId, setEditingNoteId] = useState(null);
-  const [editNoteText, setEditNoteText] = useState('');
+// Department constants
+const DEPARTMENTS = {
+  DEVELOPMENT: 'development',
+  ACCOUNTING: 'accounting', 
+  COMPLIANCE: 'compliance',
+  MANAGEMENT: 'management'
+};
 
+const DEPARTMENT_NAMES = {
+  [DEPARTMENTS.DEVELOPMENT]: 'Development',
+  [DEPARTMENTS.ACCOUNTING]: 'Accounting',
+  [DEPARTMENTS.COMPLIANCE]: 'Compliance',
+  [DEPARTMENTS.MANAGEMENT]: 'Management'
+};
+
+const DEPARTMENT_COLORS = {
+  [DEPARTMENTS.DEVELOPMENT]: 'bg-blue-500',
+  [DEPARTMENTS.ACCOUNTING]: 'bg-green-500',
+  [DEPARTMENTS.COMPLIANCE]: 'bg-purple-500',
+  [DEPARTMENTS.MANAGEMENT]: 'bg-orange-500'
+};
+
+const DEPARTMENT_TEXT_COLORS = {
+  [DEPARTMENTS.DEVELOPMENT]: 'text-blue-500',
+  [DEPARTMENTS.ACCOUNTING]: 'text-green-500',
+  [DEPARTMENTS.COMPLIANCE]: 'text-purple-500',
+  [DEPARTMENTS.MANAGEMENT]: 'text-orange-500'
+};
+
+function Dashboard({ users }) {
+  const [tasks, setTasks] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [updating, setUpdating] = useState(false);
+  const [departmentProgressKey, setDepartmentProgressKey] = useState(0);
+  const { userProfile } = useAuth();
+
+  // Task completion management moved to Database page
+
+  // Load tasks from global store
   useEffect(() => {
-    const savedNotes = JSON.parse(localStorage.getItem('dashboardNotes')) || [];
-    setNotes(savedNotes);
+    const unsubscribe = globalTaskStore.subscribe(({ tasks, isLoading }) => {
+      console.log('Dashboard: Received tasks:', tasks.length, 'isLoading:', isLoading);
+      setTasks(tasks);
+      // If we have tasks, don't show loading even if isLoading is true
+      if (tasks.length > 0) {
+        console.log('Dashboard: Have tasks, setting loading to false');
+        setLoading(false);
+      } else {
+        console.log('Dashboard: No tasks, using isLoading:', isLoading);
+        setLoading(isLoading);
+      }
+    });
+
+    // Get initial tasks from store
+    const initialTasks = globalTaskStore.getAllTasks();
+    console.log('Dashboard: Initial tasks from store:', initialTasks.length);
+    if (initialTasks.length > 0) {
+      setTasks(initialTasks);
+      setLoading(false);
+    }
+
+    // Timeout to prevent infinite loading
+    const timeout = setTimeout(() => {
+      console.log('Dashboard: Loading timeout, setting loading to false');
+      setLoading(false);
+    }, 5000); // Reduced to 5 second timeout
+
+    return () => {
+      unsubscribe();
+      clearTimeout(timeout);
+    };
   }, []);
 
-  useEffect(() => {
-    localStorage.setItem('dashboardNotes', JSON.stringify(notes));
-  }, [notes]);
-
-  // Fetch recent messages for dashboard
-  useEffect(() => {
-    if (!userProfile?.organizationId) return;
-
-    const messagesQuery = query(
-      collection(db, 'messages'),
-      where('organizationId', '==', userProfile.organizationId),
-      where('recipients', 'array-contains', userProfile.uid),
-      orderBy('createdAt', 'desc'),
-      limit(3)
-    );
-
-    const unsub = onSnapshot(messagesQuery, (snapshot) => {
-      setRecentMessages(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
-    });
-
-    return unsub;
-  }, [userProfile?.organizationId, userProfile?.uid]);
-
+  // Helper function to parse deadline dates
   function parseDeadlineDate(dateStr) {
     if (!dateStr) return null;
-    const formats = [
-      'yyyy-MM-dd',
-      'MM/dd/yyyy',
-      'M/d/yy',
-      'M/d/yyyy',
-      'MM/dd/yy',
-    ];
-    for (const fmt of formats) {
-      const d = parse(dateStr, fmt, new Date());
-      if (isValid(d)) return d;
+    try {
+      if (typeof dateStr === 'string' && dateStr.includes('-')) {
+        const datePart = dateStr.split('T')[0];
+        const parts = datePart.split('-');
+        if (parts.length === 3) {
+          const year = parseInt(parts[0], 10);
+          const month = parseInt(parts[1], 10) - 1;
+          const day = parseInt(parts[2], 10);
+          
+          if (!isNaN(year) && !isNaN(month) && !isNaN(day)) {
+            return new Date(year, month, day, 12, 0, 0);
+          }
+        }
+      }
+      
+      const parsed = parse(dateStr, 'yyyy-MM-dd', new Date());
+      if (isValid(parsed)) {
+        parsed.setHours(12, 0, 0, 0);
+        return parsed;
+      }
+      return null;
+    } catch {
+      return null;
     }
-    return null;
   }
 
-  const getTasksDueThisWeek = () => {
-    // Tasks are already expanded from App.js
+  // Get current year tasks for progress tracking
+  const getCurrentYearTasks = () => {
+    const currentYear = new Date().getFullYear();
+    const yearStart = startOfYear(new Date(currentYear, 0, 1));
+    const yearEnd = endOfYear(new Date(currentYear, 11, 31));
+    
     return tasks.filter(task => {
-      const deadlineDate = parseDeadlineDate(task.deadline);
-      // Only show incomplete tasks due this week
-      return deadlineDate && isThisWeek(deadlineDate) && !task.completed;
-    }).sort((a, b) => {
-      const da = parseDeadlineDate(a.deadline);
-      const db = parseDeadlineDate(b.deadline);
-      return da - db;
+      const deadline = parseDeadlineDate(task.deadline);
+      return deadline && isWithinInterval(deadline, { start: yearStart, end: yearEnd });
     });
   };
 
-  const addNote = () => {
-    if (newNote.trim()) {
-      const note = {
-        id: Date.now().toString(),
-        text: newNote.trim(),
-        timestamp: new Date().toISOString(),
-        createdBy: userProfile?.uid,
-        managerName: userProfile?.displayName || userProfile?.email || 'Manager',
+  const currentYearTasks = getCurrentYearTasks();
+
+  // Calculate status
+  const getCalculatedStatus = (task) => {
+    const isCompleted = task.completed === true;
+    if (isCompleted) return 'Completed';
+    
+    const deadline = parseDeadlineDate(task.deadline);
+    if (deadline && deadline < new Date()) return 'Overdue';
+    
+    return 'Active';
+  };
+
+  // Calculate top metrics
+  const getTopMetrics = () => {
+    const totalTasks = currentYearTasks.length;
+    const completedTasks = currentYearTasks.filter(task => task.completed).length;
+    const urgentTasks = currentYearTasks.filter(task => task.priority === 'Urgent').length;
+    
+    const tasksThisWeek = tasks.filter(task => {
+      const deadline = parseDeadlineDate(task.deadline);
+      return deadline && isThisWeek(deadline);
+    }).length;
+
+    const overdueTasks = tasks.filter(task => getCalculatedStatus(task) === 'Overdue').length;
+
+    return {
+      total: totalTasks,
+      completed: completedTasks,
+      urgent: urgentTasks,
+      dueThisWeek: tasksThisWeek,
+      overdue: overdueTasks
+    };
+  };
+
+  const metrics = getTopMetrics();
+
+  // Get tasks due this week
+  const getTasksThisWeek = () => {
+    return tasks.filter(task => {
+      const deadline = parseDeadlineDate(task.deadline);
+      return deadline && isThisWeek(deadline);
+    }).map(task => {
+      const deadline = parseDeadlineDate(task.deadline);
+      const today = new Date();
+      const todayAtNoon = new Date(today.getFullYear(), today.getMonth(), today.getDate(), 12, 0, 0);
+      const deadlineStartOfDay = deadline ? new Date(deadline.getFullYear(), deadline.getMonth(), deadline.getDate()) : null;
+      const todayStartOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+      const daysUntil = deadlineStartOfDay ? differenceInDays(deadlineStartOfDay, todayStartOfDay) : 0;
+      
+      return {
+        ...task,
+        deadline,
+        daysUntil,
+        isCompleted: task.completed
       };
-      setNotes([...notes, note]);
-      setNewNote('');
-    }
+    }).sort((a, b) => {
+      if (a.isCompleted !== b.isCompleted) {
+        return a.isCompleted ? 1 : -1;
+      }
+      return a.daysUntil - b.daysUntil;
+    });
   };
 
-  const deleteNote = (id) => {
-    setNotes(notes.filter(note => note.id !== id));
-  };
+  const tasksThisWeek = getTasksThisWeek();
 
-  const startEditNote = (note) => {
-    setEditingNoteId(note.id);
-    setEditNoteText(note.text);
-  };
-
-  const saveEditNote = () => {
-    if (editNoteText.trim()) {
-      setNotes(notes.map(note => 
-        note.id === editingNoteId 
-          ? { ...note, text: editNoteText.trim() }
-          : note
-      ));
-      setEditingNoteId(null);
-      setEditNoteText('');
-    }
-  };
-
-  const cancelEditNote = () => {
-    setEditingNoteId(null);
-    setEditNoteText('');
-  };
-
-  const formatMessageDate = (timestamp) => {
-    if (!timestamp) return '';
-    const date = timestamp.toDate ? timestamp.toDate() : new Date(timestamp);
-    return date.toLocaleDateString();
-  };
-
-  const truncateText = (text, maxLength = 50) => {
-    if (text.length <= maxLength) return text;
-    return text.substring(0, maxLength) + '...';
-  };
-
-  const tasksDueThisWeek = getTasksDueThisWeek();
-
-  // Filter recent messages: only last 7 days, not deleted, not team announcements
-  const now = new Date();
-  const filteredMessages = recentMessages.filter(msg => {
-    if (msg.deleted) return false;
-    if (msg.isAnnouncement) return false; // Team announcements go to Manager Notes
-    if (!msg.createdAt) return false;
-    const created = msg.createdAt.toDate ? msg.createdAt.toDate() : new Date(msg.createdAt);
-    return differenceInDays(now, created) <= 7;
-  });
-
-  // Team announcements for Manager Notes
-  const teamAnnouncements = recentMessages.filter(msg => msg.isAnnouncement && !msg.deleted);
-
-  const handleDeleteAnnouncement = async (id) => {
+  // Get department progress
+  const getDepartmentProgress = () => {
+    const progress = {};
+    
+    // Load user assignments from localStorage
+    const USER_ASSIGNMENTS_KEY = 'user_assignments';
+    let localAssignments = {};
+    
     try {
-      await updateDoc(doc(db, 'messages', id), { deleted: true });
-      setRecentMessages(msgs => msgs.map(m => m.id === id ? { ...m, deleted: true } : m));
-    } catch (err) {
-      // Optionally show error
+      const storedAssignments = localStorage.getItem(USER_ASSIGNMENTS_KEY);
+      if (storedAssignments) {
+        localAssignments = JSON.parse(storedAssignments);
+      }
+    } catch (error) {
+      console.error('Dashboard: Error parsing localStorage assignments:', error);
     }
+    
+    // Initialize all departments
+    Object.values(DEPARTMENTS).forEach(dept => {
+      progress[dept] = {
+        name: DEPARTMENT_NAMES[dept],
+        completed: 0,
+        total: 0,
+        percentage: 0,
+        color: DEPARTMENT_COLORS[dept],
+        textColor: DEPARTMENT_TEXT_COLORS[dept]
+      };
+    });
+    
+    if (!users || users.length === 0) {
+      return Object.values(progress);
+    }
+
+    currentYearTasks.forEach(task => {
+      const responsibleParty = task.responsibleParty || '';
+      
+      // Find all users assigned to this task
+      const assignedUsers = users.filter(user => {
+        const userEmail = user.email || user.Email || user.mail || user.userPrincipalName || '';
+        const userDisplayName = user.displayName || user.DisplayName || '';
+        
+        let responsiblePartyStr = '';
+        if (typeof responsibleParty === 'string') {
+          responsiblePartyStr = responsibleParty;
+        } else if (Array.isArray(responsibleParty)) {
+          responsiblePartyStr = responsibleParty.map(item => {
+            if (typeof item === 'object' && item.LookupValue) {
+              return item.LookupValue;
+            }
+            if (typeof item === 'object' && item.Email) {
+              return item.Email;
+            }
+            return String(item);
+          }).join('; ');
+        } else if (responsibleParty && typeof responsibleParty === 'object') {
+          responsiblePartyStr = responsibleParty.LookupValue || responsibleParty.Email || String(responsibleParty);
+        } else {
+          responsiblePartyStr = String(responsibleParty || '');
+        }
+        
+        return responsiblePartyStr && responsiblePartyStr.trim() !== '' && 
+               (responsiblePartyStr.includes(userEmail) || responsiblePartyStr.includes(userDisplayName));
+      });
+      
+      // Collect all unique departments from all assigned users
+      const taskDepartments = new Set();
+      assignedUsers.forEach(assignedUser => {
+        const userDepartments = assignedUser.departments || [];
+        userDepartments.forEach(department => {
+          taskDepartments.add(department);
+        });
+      });
+      
+      // Determine completion status
+      const isCompleted = task.completed;
+      
+      // Count this task once for each unique department
+      taskDepartments.forEach(department => {
+        if (progress[department]) {
+          progress[department].total++;
+          if (isCompleted) {
+            progress[department].completed++;
+          }
+        }
+      });
+    });
+    
+    // Calculate percentages
+    Object.values(DEPARTMENTS).forEach(dept => {
+      const stats = progress[dept];
+      stats.percentage = stats.total > 0 ? Math.round((stats.completed / stats.total) * 100) : 0;
+    });
+    
+    return Object.values(progress);
   };
 
-  return (
-    <div className="flex flex-col lg:flex-row gap-4 lg:gap-6 h-full min-h-screen w-full">
-      {/* This Week's Deadlines Section - 65% width on desktop, full width on mobile */}
-      <div className="w-full lg:w-2/3 flex flex-col">
-        <div className="bg-white dark:bg-gray-800 rounded-lg shadow-md p-4 lg:p-6 flex-1 flex flex-col">
-          <h2 className="text-xl font-bold text-gray-800 dark:text-white mb-4 flex items-center">
-            <svg className="w-6 h-6 mr-2 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-            </svg>
-            Deadlines This Week
-          </h2>
-          
-          <div className="flex-1">
-            {tasksDueThisWeek.length === 0 ? (
-              <div className="text-gray-500 dark:text-gray-400 text-center py-8 h-full flex flex-col justify-center">
-                <svg className="w-12 h-12 mx-auto mb-3 text-gray-300 dark:text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-                </svg>
-                <p className="text-lg text-gray-700 dark:text-gray-300">No deadlines due this week</p>
-                <p className="text-sm text-gray-500 dark:text-gray-400">You're all caught up!</p>
-              </div>
-            ) : (
-              <div className="space-y-4">
-                {tasksDueThisWeek.map((task) => {
-                  const deadlineDate = parseDeadlineDate(task.deadline);
-                  const isToday = deadlineDate && format(deadlineDate, 'yyyy-MM-dd') === format(new Date(), 'yyyy-MM-dd');
-                  const isTomorrow = deadlineDate && format(deadlineDate, 'yyyy-MM-dd') === format(new Date(Date.now() + 86400000), 'yyyy-MM-dd');
-                  const completed = !!task.completed;
-                  
-                  // Get status colors and styling
-                  const getStatusConfig = () => {
-                    if (completed) {
-                      return {
-                        bg: 'bg-gradient-to-r from-green-50 to-emerald-50 dark:from-green-900/20 dark:to-emerald-900/20',
-                        border: 'border-green-200 dark:border-green-700',
-                        badge: 'bg-green-100 dark:bg-green-900/30 text-green-800 dark:text-green-200',
-                        text: 'text-green-800 dark:text-green-200',
-                        icon: 'text-green-600 dark:text-green-400'
-                      };
-                    } else if (isToday) {
-                      return {
-                        bg: 'bg-gradient-to-r from-red-50 to-pink-50 dark:from-red-900/20 dark:to-pink-900/20',
-                        border: 'border-red-200 dark:border-red-700',
-                        badge: 'bg-red-100 dark:bg-red-900/30 text-red-800 dark:text-red-200',
-                        text: 'text-red-800 dark:text-red-200',
-                        icon: 'text-red-600 dark:text-red-400'
-                      };
-                    } else if (isTomorrow) {
-                      return {
-                        bg: 'bg-gradient-to-r from-orange-50 to-amber-50 dark:from-orange-900/20 dark:to-amber-900/20',
-                        border: 'border-orange-200 dark:border-orange-700',
-                        badge: 'bg-orange-100 dark:bg-orange-900/30 text-orange-800 dark:text-orange-200',
-                        text: 'text-orange-800 dark:text-orange-200',
-                        icon: 'text-orange-600 dark:text-orange-400'
-                      };
-                    } else {
-                      return {
-                        bg: 'bg-gradient-to-r from-blue-50 to-indigo-50 dark:from-blue-900/20 dark:to-indigo-900/20',
-                        border: 'border-blue-200 dark:border-blue-700',
-                        badge: 'bg-blue-100 dark:bg-blue-900/30 text-blue-800 dark:text-blue-200',
-                        text: 'text-blue-800 dark:text-blue-200',
-                        icon: 'text-blue-600 dark:text-blue-400'
-                      };
-                    }
-                  };
-                  
-                  const status = getStatusConfig();
-                  
-                  return (
-                    <div key={task.id} className={`group relative overflow-hidden rounded-xl border ${status.border} ${status.bg} transition-all duration-300 hover:shadow-lg hover:scale-[1.02] hover:border-opacity-80`}>
-                      {/* Background pattern */}
-                      <div className="absolute inset-0 opacity-5">
-                        <div className="absolute top-0 right-0 w-32 h-32 transform translate-x-8 -translate-y-8">
-                          <svg className="w-full h-full" viewBox="0 0 100 100" fill="currentColor">
-                            <circle cx="20" cy="20" r="2" />
-                            <circle cx="80" cy="20" r="2" />
-                            <circle cx="50" cy="50" r="2" />
-                            <circle cx="20" cy="80" r="2" />
-                            <circle cx="80" cy="80" r="2" />
-                          </svg>
-                        </div>
-                      </div>
-                      
-                      <div className="relative p-5">
-                        {/* Header with status badge */}
-                        <div className="flex items-start justify-between mb-3">
-                          <div className="flex-1 min-w-0">
-                            <h3 className={`text-lg font-bold ${completed ? 'line-through opacity-75' : 'text-gray-900 dark:text-white'} transition-all duration-200 group-hover:text-opacity-90`}>
-                              {task.description}
-                            </h3>
-                          </div>
-                          <div className="flex items-center gap-2 ml-4">
-                            {/* Status badge */}
-                            <span className={`px-3 py-1.5 rounded-full text-xs font-bold tracking-wide uppercase shadow-sm ${status.badge}`}>
-                              {completed ? 'COMPLETED' : isToday ? 'TODAY' : isTomorrow ? 'TOMORROW' : format(deadlineDate, 'EEEE')}
-                            </span>
-                            
-                            {/* Complete button */}
-                            <button
-                              onClick={() => onToggleCompleted(task.instanceId, task.originalId)}
-                              className={`w-10 h-10 flex items-center justify-center rounded-full transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-theme-primary shadow-sm hover:shadow-md transform hover:scale-105 ${
-                                completed 
-                                  ? 'bg-green-500 text-white hover:bg-green-600 shadow-green-200 dark:shadow-green-900/30' 
-                                  : 'bg-white dark:bg-gray-700 text-gray-600 dark:text-gray-300 hover:text-green-600 dark:hover:text-green-400 border border-gray-200 dark:border-gray-600'
-                              }`}
-                              title={completed ? 'Mark as Incomplete' : 'Mark as Completed'}
-                              aria-label={completed ? 'Mark as Incomplete' : 'Mark as Completed'}
-                            >
-                              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2.5} stroke="currentColor" className="w-5 h-5">
-                                <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
-                              </svg>
-                            </button>
-                          </div>
-                        </div>
-                        
-                        {/* Project and responsible party info */}
-                        <div className="space-y-2">
-                          <div className="flex items-center gap-3 text-sm">
-                            <div className="flex items-center gap-2">
-                              <svg className={`w-4 h-4 ${status.icon}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
-                              </svg>
-                              <span className="font-medium text-gray-600 dark:text-gray-400">Project:</span>
-                              <span className="font-semibold text-gray-800 dark:text-gray-200">{task.projectName}</span>
-                            </div>
-                          </div>
-                          
-                          <div className="flex items-center gap-3 text-sm">
-                            <div className="flex items-center gap-2">
-                              <svg className={`w-4 h-4 ${status.icon}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
-                              </svg>
-                              <span className="font-medium text-gray-600 dark:text-gray-400">Responsible:</span>
-                              <span className="font-semibold text-gray-800 dark:text-gray-200">{task.responsibleParty}</span>
-                            </div>
-                          </div>
-                        </div>
-                        
-                        {/* Deadline date */}
-                        {deadlineDate && (
-                          <div className="mt-3 pt-3 border-t border-gray-200 dark:border-gray-600">
-                            <div className="flex items-center gap-2 text-sm">
-                              <svg className={`w-4 h-4 ${status.icon}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
-                              </svg>
-                              <span className="font-medium text-gray-600 dark:text-gray-400">Due:</span>
-                              <span className={`font-bold ${status.text}`}>
-                                {format(deadlineDate, 'EEEE, MMMM d, yyyy')}
-                              </span>
-                            </div>
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
+  const departmentProgress = React.useMemo(() => {
+    return getDepartmentProgress();
+  }, [users, tasks, departmentProgressKey]);
+
+  // Recalculate department progress when users load
+  React.useEffect(() => {
+    if (users && users.length > 0) {
+      setDepartmentProgressKey(prev => prev + 1);
+    }
+  }, [users]);
+
+  // Get project progress
+  const getProjectProgress = () => {
+    const projects = {};
+    
+    currentYearTasks.forEach(task => {
+      const projectName = task.project || 'Unassigned';
+      
+      if (!projects[projectName]) {
+        projects[projectName] = { completed: 0, total: 0 };
+      }
+      projects[projectName].total++;
+      
+      if (task.completed) {
+        projects[projectName].completed++;
+      }
+    });
+    
+    return Object.entries(projects)
+      .map(([name, data]) => ({
+        name,
+        completed: data.completed,
+        total: data.total,
+        percentage: data.total > 0 ? Math.round((data.completed / data.total) * 100) : 0
+      }))
+      .sort((a, b) => b.total - a.total)
+      .slice(0, 8);
+  };
+
+  const projectProgress = getProjectProgress();
+
+  // Circular progress component
+  const CircularProgress = ({ percentage, size = 120, strokeWidth = 8, color = 'text-blue-500' }) => {
+    const radius = (size - strokeWidth) / 2;
+    const circumference = radius * 2 * Math.PI;
+    const strokeDasharray = circumference;
+    const adjustedPercentage = Math.max(percentage, 2);
+    const strokeDashoffset = circumference - (adjustedPercentage / 100) * circumference;
+
+    return (
+      <div className="relative inline-flex items-center justify-center">
+        <svg width={size} height={size} className="transform -rotate-90">
+          <circle
+            cx={size / 2}
+            cy={size / 2}
+            r={radius}
+            stroke="currentColor"
+            strokeWidth={strokeWidth}
+            fill="transparent"
+            className="text-gray-200 dark:text-gray-700"
+          />
+          <circle
+            cx={size / 2}
+            cy={size / 2}
+            r={radius}
+            stroke="currentColor"
+            strokeWidth={strokeWidth}
+            fill="transparent"
+            strokeDasharray={strokeDasharray}
+            strokeDashoffset={strokeDashoffset}
+            className={`${color} transition-all duration-500 ease-in-out`}
+            strokeLinecap="round"
+          />
+        </svg>
+        <div className="absolute inset-0 flex items-center justify-center">
+          <span className="text-2xl font-bold text-gray-900 dark:text-white">{percentage}%</span>
         </div>
       </div>
+    );
+  };
 
-      {/* Right Sidebar - 35% width on desktop, full width on mobile */}
-      <div className="w-full lg:w-1/3 flex flex-col gap-4 lg:gap-6">
-        {/* Recent Messages Section */}
-        <div className="bg-white dark:bg-gray-800 rounded-lg shadow-md p-4 lg:p-6 flex flex-col">
-          <h2 className="text-xl font-bold text-gray-800 dark:text-white mb-4 flex items-center">
-            <svg className="w-6 h-6 mr-2 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
-            </svg>
-            Recent Messages
-          </h2>
-          
-          <div className="flex-1 space-y-3">
-            {filteredMessages.length === 0 ? (
-                          <div className="text-gray-500 dark:text-gray-400 text-center py-4">
-              <p className="text-sm">No recent messages</p>
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-gray-50 dark:bg-gray-900 flex items-center justify-center">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto mb-4"></div>
+          <p className="text-gray-600 dark:text-gray-400">Loading dashboard...</p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-gray-50 dark:bg-gray-900 p-6 pb-16 relative">
+      {/* Updating Overlay */}
+      {updating && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50">
+          <div className="bg-white dark:bg-gray-800 rounded-xl shadow-2xl p-8 flex flex-col items-center gap-4 border border-gray-200 dark:border-gray-700">
+            <div className="animate-spin rounded-full h-16 w-16 border-4 border-blue-200 border-t-blue-600"></div>
+            <div className="text-center">
+              <p className="text-lg font-semibold text-gray-900 dark:text-white">Updating...</p>
+              <p className="text-sm text-gray-600 dark:text-gray-400 mt-1">Syncing with database</p>
             </div>
+          </div>
+        </div>
+      )}
+      
+      <div className="max-w-7xl mx-auto space-y-8">
+        {/* Header */}
+        <div className="flex justify-between items-center">
+          <div>
+            <h1 className="text-3xl font-bold text-gray-900 dark:text-white">Dashboard</h1>
+            <p className="text-gray-600 dark:text-gray-400 mt-1">
+              Welcome back, {userProfile?.displayName || 'User'}! Here's your project overview.
+            </p>
+          </div>
+          <div className="text-sm text-gray-500 dark:text-gray-400">
+            {format(new Date(), 'EEEE, MMMM do, yyyy')}
+          </div>
+        </div>
+
+        {/* Top Metrics */}
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-6">
+          {/* Total Tasks */}
+          <div className="bg-white dark:bg-gray-800 rounded-xl shadow-lg p-6 border border-gray-200 dark:border-gray-700">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-sm font-medium text-gray-600 dark:text-gray-400">Total Tasks</p>
+                <p className="text-3xl font-bold text-gray-900 dark:text-white mt-2">{metrics.total}</p>
+                <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">This year</p>
+              </div>
+              <div className="p-3 bg-blue-100 dark:bg-blue-900/30 rounded-full">
+                <ChartBarIcon className="w-8 h-8 text-blue-600 dark:text-blue-400" />
+              </div>
+            </div>
+          </div>
+
+          {/* Completed Tasks */}
+          <div className="bg-white dark:bg-gray-800 rounded-xl shadow-lg p-6 border border-gray-200 dark:border-gray-700">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-sm font-medium text-gray-600 dark:text-gray-400">Completed</p>
+                <p className="text-3xl font-bold text-green-600 dark:text-green-400 mt-2">{metrics.completed}</p>
+                <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">This year</p>
+                <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                  {metrics.total > 0 ? Math.round((metrics.completed / metrics.total) * 100) : 0}% completion rate
+                </p>
+              </div>
+              <div className="p-3 bg-green-100 dark:bg-green-900/30 rounded-full">
+                <CheckCircleIcon className="w-8 h-8 text-green-600 dark:text-green-400" />
+              </div>
+            </div>
+          </div>
+
+          {/* Urgent Tasks */}
+          <div className="bg-white dark:bg-gray-800 rounded-xl shadow-lg p-6 border border-gray-200 dark:border-gray-700">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-sm font-medium text-gray-600 dark:text-gray-400">Urgent</p>
+                <p className="text-3xl font-bold text-orange-600 dark:text-orange-400 mt-2">{metrics.urgent}</p>
+                <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">This year</p>
+              </div>
+              <div className="p-3 bg-orange-100 dark:bg-orange-900/30 rounded-full">
+                <ExclamationTriangleIcon className="w-8 h-8 text-orange-600 dark:text-orange-400" />
+              </div>
+            </div>
+          </div>
+
+          {/* Due This Week */}
+          <div className="bg-white dark:bg-gray-800 rounded-xl shadow-lg p-6 border border-gray-200 dark:border-gray-700">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-sm font-medium text-gray-600 dark:text-gray-400">Due This Week</p>
+                <p className="text-3xl font-bold text-yellow-600 dark:text-yellow-400 mt-2">{metrics.dueThisWeek}</p>
+                <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">Deadlines approaching</p>
+              </div>
+              <div className="p-3 bg-yellow-100 dark:bg-yellow-900/30 rounded-full">
+                <CalendarDaysIcon className="w-8 h-8 text-yellow-600 dark:text-yellow-400" />
+              </div>
+            </div>
+          </div>
+
+          {/* Overdue Tasks */}
+          <div className="bg-white dark:bg-gray-800 rounded-xl shadow-lg p-6 border border-gray-200 dark:border-gray-700">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-sm font-medium text-gray-600 dark:text-gray-400">Overdue</p>
+                <p className="text-3xl font-bold text-red-600 dark:text-red-400 mt-2">{metrics.overdue}</p>
+                <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">Need attention</p>
+              </div>
+              <div className="p-3 bg-red-100 dark:bg-red-900/30 rounded-full">
+                <ExclamationTriangleIcon className="w-8 h-8 text-red-600 dark:text-red-400" />
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Deadlines This Week */}
+        <div className="bg-white dark:bg-gray-800 rounded-xl shadow-lg border border-gray-200 dark:border-gray-700">
+          <div className="p-6 border-b border-gray-200 dark:border-gray-700">
+            <div className="flex items-center gap-3">
+              <div className="p-2 bg-yellow-100 dark:bg-yellow-900/30 rounded-lg">
+                <CalendarDaysIcon className="w-6 h-6 text-yellow-600 dark:text-yellow-400" />
+              </div>
+              <div>
+                <h3 className="text-lg font-semibold text-gray-900 dark:text-white">Deadlines This Week</h3>
+                <p className="text-sm text-gray-600 dark:text-gray-400">{tasksThisWeek.length} tasks due</p>
+              </div>
+            </div>
+          </div>
+          <div className="p-6">
+            {tasksThisWeek.length > 0 ? (
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+                {tasksThisWeek.map(task => (
+                  <TaskCard
+                    key={task.id} 
+                    task={task}
+                    users={users}
+                  />
+                ))}
+              </div>
             ) : (
-              filteredMessages.map((message) => {
-                const linkedTask = message.linkedDeadline;
-                return (
-                  <div key={message.id} className="p-3 bg-gray-50 dark:bg-gray-700 rounded-lg border-l-3 border-blue-400 dark:border-blue-500 flex items-center justify-between">
-                    <div>
-                      <div className="flex items-center gap-2">
-                        <span className="font-medium text-sm text-gray-900 dark:text-white">
-                          {message.senderName || message.senderEmail}
-                        </span>
-                        <span className="text-xs text-gray-500 dark:text-gray-400">
-                          {formatMessageDate(message.createdAt)}
-                        </span>
-                      </div>
-                      <p className="text-sm text-gray-700 dark:text-gray-300 mb-2">
-                        {truncateText(message.content, 60)}
-                      </p>
-                    </div>
-                    {linkedTask && (
-                      <button
-                        className="ml-4 px-2 py-1 bg-theme-primary-light text-theme-primary-dark rounded-full text-xs font-semibold hover:bg-theme-primary-light transition"
-                        onClick={() => onTaskLinkClick && onTaskLinkClick(linkedTask)}
-                        title="View Task in Sort Deadlines"
-                      >
-                        View Task
-                      </button>
-                    )}
-                  </div>
-                );
-              })
+              <div className="text-center py-8">
+                <CalendarDaysIcon className="w-12 h-12 text-gray-400 dark:text-gray-500 mx-auto mb-4" />
+                <p className="text-gray-500 dark:text-gray-400">No deadlines this week</p>
+                <p className="text-sm text-gray-400 dark:text-gray-500 mt-1">You're all caught up!</p>
+              </div>
             )}
           </div>
         </div>
 
-        {/* Manager Notes Section */}
-        <div className="bg-white dark:bg-gray-800 rounded-lg shadow-md p-4 lg:p-6 flex-1 flex flex-col">
-          <h2 className="text-xl font-bold text-gray-800 dark:text-white mb-4 flex items-center">
-            <svg className="w-6 h-6 mr-2 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
-            </svg>
-            Manager Notes
-          </h2>
-          
-          {/* Team Announcements */}
-          {teamAnnouncements.length > 0 && (
-            <div className="mb-4">
-              <h3 className="text-md font-semibold text-gray-700 mb-2">Team Announcements</h3>
-              <div className="space-y-2">
-                {teamAnnouncements.map(announcement => (
-                  <div key={announcement.id} className="bg-blue-50 dark:bg-blue-900/20 border-l-4 border-blue-400 dark:border-blue-500 rounded p-3 relative">
-                    {/* Name on top */}
-                    <div className="font-semibold text-gray-900 dark:text-white text-sm mb-1">
-                      {announcement.senderName || announcement.senderEmail}
+        {/* Progress Charts */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+          {/* Department Progress */}
+          <div className="bg-white dark:bg-gray-800 rounded-xl shadow-lg border border-gray-200 dark:border-gray-700">
+            <div className="p-6 border-b border-gray-200 dark:border-gray-700">
+              <div className="flex items-center gap-3">
+                <div className="p-2 bg-blue-100 dark:bg-blue-900/30 rounded-lg">
+                  <BuildingOfficeIcon className="w-6 h-6 text-blue-600 dark:text-blue-400" />
+                </div>
+                <div>
+                  <h3 className="text-lg font-semibold text-gray-900 dark:text-white">Department Progress</h3>
+                  <p className="text-sm text-gray-600 dark:text-gray-400">Current year completion</p>
+                </div>
+              </div>
+            </div>
+            <div className="p-6">
+              <div className="grid grid-cols-2 gap-6">
+                {departmentProgress.map(dept => (
+                  <div key={dept.name} className="text-center">
+                    <div className="mb-4">
+                      <CircularProgress 
+                        percentage={dept.percentage} 
+                        size={100} 
+                        strokeWidth={6}
+                        color={dept.textColor}
+                      />
                     </div>
-                    
-                    {/* Date and time underneath */}
-                    <div className="text-xs text-gray-500 dark:text-gray-400 mb-2">
-                      {formatMessageDate(announcement.createdAt)}
-                    </div>
-                    
-                    {/* Message content */}
-                    <div className="text-gray-800 dark:text-gray-200 text-sm leading-relaxed">
-                      {announcement.content}
-                    </div>
-                    
-                    {/* Trash icon in top-right corner */}
-                    {(hasPermission(ROLES.ADMIN) || hasPermission(ROLES.OWNER)) && (
-                      <button
-                        onClick={() => handleDeleteAnnouncement(announcement.id)}
-                        className="absolute top-2 right-2 p-1.5 text-gray-400 hover:text-red-500 dark:text-gray-500 dark:hover:text-red-400 transition-colors duration-200 rounded-full hover:bg-blue-100 dark:hover:bg-blue-900/30"
-                        title="Delete Announcement"
-                      >
-                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                        </svg>
-                      </button>
-                    )}
+                    <h4 className="font-medium text-gray-900 dark:text-white text-sm">{dept.name}</h4>
+                    <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                      {dept.completed} of {dept.total} tasks
+                    </p>
                   </div>
                 ))}
               </div>
             </div>
-          )}
+          </div>
 
-          {/* Notes List */}
-          <div className="flex-1 space-y-3">
-            {notes.length === 0 ? (
-              <div className="text-gray-500 dark:text-gray-400 text-center py-8 h-full flex flex-col justify-center">
-                <svg className="w-12 h-12 mx-auto mb-3 text-gray-300 dark:text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                </svg>
-                <p className="text-lg dark:text-gray-300">No notes yet</p>
-              </div>
-            ) : (
-              notes.map((note) => (
-                <div key={note.id} className="bg-gray-50 dark:bg-gray-700 rounded-lg p-4 border border-gray-200 dark:border-gray-600 relative">
-                  {/* Name on top */}
-                  <div className="font-semibold text-gray-900 dark:text-white text-sm mb-1">
-                    {note.managerName || 'Manager'}
-                  </div>
-                  
-                  {/* Date and time underneath */}
-                  <div className="text-xs text-gray-500 dark:text-gray-400 mb-3">
-                    {format(new Date(note.timestamp), 'MMM d, yyyy h:mm a')}
-                  </div>
-                  
-                  {/* Message content */}
-                  <div className="text-gray-800 dark:text-gray-200 whitespace-pre-wrap text-sm leading-relaxed">
-                    {note.text}
-                  </div>
-                  
-                  {/* Trash icon in top-right corner */}
-                  <button
-                    onClick={() => deleteNote(note.id)}
-                    className="absolute top-3 right-3 p-1.5 text-gray-400 hover:text-red-500 dark:text-gray-500 dark:hover:text-red-400 transition-colors duration-200 rounded-full hover:bg-gray-100 dark:hover:bg-gray-600"
-                    title="Delete Note"
-                  >
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                    </svg>
-                  </button>
+          {/* Project Progress */}
+          <div className="bg-white dark:bg-gray-800 rounded-xl shadow-lg border border-gray-200 dark:border-gray-700">
+            <div className="p-6 border-b border-gray-200 dark:border-gray-700">
+              <div className="flex items-center gap-3">
+                <div className="p-2 bg-purple-100 dark:bg-purple-900/30 rounded-lg">
+                  <FolderIcon className="w-6 h-6 text-purple-600 dark:text-purple-400" />
                 </div>
-              ))
-            )}
+                <div>
+                  <h3 className="text-lg font-semibold text-gray-900 dark:text-white">Project Progress</h3>
+                  <p className="text-sm text-gray-600 dark:text-gray-400">Current year completion</p>
+                </div>
+              </div>
+            </div>
+            <div className="p-6">
+              {projectProgress.length > 0 ? (
+                <div className="space-y-4">
+                  {projectProgress.map(project => (
+                    <div key={project.name} className="flex items-center justify-between">
+                      <div className="flex-1">
+                        <div className="flex items-center justify-between mb-2">
+                          <h4 className="font-medium text-gray-900 dark:text-white text-sm truncate">
+                            {project.name}
+                          </h4>
+                          <span className="text-sm font-medium text-gray-600 dark:text-gray-400">
+                            {project.percentage}%
+                          </span>
+                        </div>
+                        <div className="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2">
+                          <div 
+                            className="bg-gradient-to-r from-blue-500 to-purple-500 h-2 rounded-full transition-all duration-500 ease-in-out"
+                            style={{ width: `${project.percentage}%` }}
+                          ></div>
+                        </div>
+                        <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                          {project.completed} of {project.total} tasks completed
+                        </p>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="text-center py-8">
+                  <FolderIcon className="w-12 h-12 text-gray-400 dark:text-gray-500 mx-auto mb-4" />
+                  <p className="text-gray-500 dark:text-gray-400">No projects this year</p>
+                  <p className="text-sm text-gray-400 dark:text-gray-500 mt-1">Start adding tasks to see progress</p>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* Bottom Summary */}
+        <div className="bg-white dark:bg-gray-800 rounded-xl shadow-lg border border-gray-200 dark:border-gray-700 p-6">
+          <div className="flex items-center justify-between">
+            <div>
+              <h3 className="text-lg font-semibold text-gray-900 dark:text-white">Year-to-Date Summary</h3>
+              <p className="text-sm text-gray-600 dark:text-gray-400">
+                {currentYearTasks.length} tasks created this year across {projectProgress.length} projects
+              </p>
+            </div>
+            <div className="text-right">
+              <p className="text-2xl font-bold text-blue-600 dark:text-blue-400">
+                {currentYearTasks.length > 0 
+                  ? Math.round((currentYearTasks.filter(task => task.completed).length / currentYearTasks.length) * 100)
+                  : 0}%
+              </p>
+              <p className="text-sm text-gray-500 dark:text-gray-400">Overall completion</p>
+            </div>
           </div>
         </div>
       </div>
@@ -452,4 +634,4 @@ function Dashboard({ tasks, onToggleCompleted, onTaskLinkClick }) {
   );
 }
 
-export default Dashboard; 
+export default Dashboard;

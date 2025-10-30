@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Create Teams Icons</title>
+    <style>
+        body { font-family: Arial, sans-serif; padding: 20px; text-align: center; }
+        .btn { 
+            background: #2563eb; 
+            color: white; 
+            padding: 15px 30px; 
+            border: none; 
+            border-radius: 8px; 
+            cursor: pointer; 
+            margin: 10px;
+            font-size: 16px;
+            font-weight: bold;
+        }
+        .btn:hover { background: #1d4ed8; }
+        .success { color: #059669; font-weight: bold; }
+        .error { color: #dc2626; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <h1>🚀 Create Teams App Icons</h1>
+    <p>Click the buttons below to create the required PNG files:</p>
+    
+    <button class="btn" onclick="createIcon(192, 192, 'color.png')">Create color.png (192x192)</button>
+    <button class="btn" onclick="createIcon(32, 32, 'outline.png')">Create outline.png (32x32)</button>
+    
+    <div id="status"></div>
+    
+    <script>
+        function createIcon(width, height, filename) {
+            const canvas = document.createElement('canvas');
+            canvas.width = width;
+            canvas.height = height;
+            const ctx = canvas.getContext('2d');
+            
+            const img = new Image();
+            img.crossOrigin = 'anonymous';
+            
+            img.onload = function() {
+                // Clear canvas
+                ctx.clearRect(0, 0, width, height);
+                
+                // Draw the SVG image
+                ctx.drawImage(img, 0, 0, width, height);
+                
+                // Convert to blob and download
+                canvas.toBlob(function(blob) {
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = filename;
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    URL.revokeObjectURL(url);
+                    
+                    document.getElementById('status').innerHTML = 
+                        `<p class="success">✅ ${filename} created successfully!</p>
+                         <p>Now move it to the teams-app-package folder and recreate the ZIP.</p>`;
+                });
+            };
+            
+            img.onerror = function() {
+                document.getElementById('status').innerHTML = 
+                    `<p class="error">❌ Error: Could not load CC_App_Icon.svg</p>
+                     <p>Make sure the SVG file is in the teams-app-package directory.</p>`;
+            };
+            
+            // Load the SVG file
+            img.src = './CC_App_Icon.svg';
+        }
+    </script>
+</body>
+</html> 

@@ -1,0 +1,3 @@
+Version: 1.2.6
+Backup Date: 2025-08-16T19:02:12.365Z
+Description: Implemented loading overlay to render Messages tab behind loading screen
