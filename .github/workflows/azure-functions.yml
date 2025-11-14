@@ -49,7 +49,28 @@ jobs:
       - name: Deploy to Azure Functions using func
         working-directory: azure-functions
         run: |
-          echo "${{ secrets.AZURE_FUNCTIONAPP_PUBLISH_PROFILE }}" | base64 -d > publish-profile.xml
+          # Check if publish profile secret exists and is valid
+          if [ -z "${{ secrets.AZURE_FUNCTIONAPP_PUBLISH_PROFILE }}" ]; then
+            echo "ERROR: AZURE_FUNCTIONAPP_PUBLISH_PROFILE secret is not set"
+            exit 1
+          fi
+          
+          # Decode publish profile (handle both base64 encoded and plain text)
+          PUBLISH_PROFILE="${{ secrets.AZURE_FUNCTIONAPP_PUBLISH_PROFILE }}"
+          if echo "$PUBLISH_PROFILE" | base64 -d > publish-profile.xml 2>/dev/null; then
+            echo "Publish profile decoded from base64"
+          else
+            # If base64 decode fails, try using it as plain text
+            echo "$PUBLISH_PROFILE" > publish-profile.xml
+            echo "Using publish profile as plain text"
+          fi
+          
+          # Verify publish profile file was created
+          if [ ! -f publish-profile.xml ]; then
+            echo "ERROR: Failed to create publish-profile.xml"
+            exit 1
+          fi
+          
           # Use local build to ensure entry point discovery works correctly
           # Remote build may not preserve the v4 programming model structure
           # Adding --force to ensure clean deployment
