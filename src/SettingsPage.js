@@ -9,6 +9,9 @@ function SettingsPage() {
   
   // Theme and dark mode state
   const [isDarkMode, setIsDarkMode] = useState(false);
+  
+  // Department filter state
+  const [departmentFilterEnabled, setDepartmentFilterEnabled] = useState(false);
 
   // Load current theme settings
   useEffect(() => {
@@ -30,6 +33,20 @@ function SettingsPage() {
     return () => window.removeEventListener('themeChanged', handler);
   }, []);
 
+  // Load department filter setting
+  useEffect(() => {
+    const loadDepartmentFilterSetting = () => {
+      try {
+        const saved = localStorage.getItem('departmentFilterEnabled');
+        setDepartmentFilterEnabled(saved === 'true');
+      } catch (err) {
+        console.error('Error loading department filter setting:', err);
+      }
+    };
+
+    loadDepartmentFilterSetting();
+  }, []);
+
   // Handle dark mode toggle
   const handleDarkModeToggle = () => {
     try {
@@ -40,6 +57,27 @@ function SettingsPage() {
     } catch (err) {
       console.error('Error toggling dark mode:', err);
       setError('Failed to update theme. Please try again.');
+      setTimeout(() => setError(''), 5000);
+    }
+  };
+
+  // Handle department filter toggle
+  const handleDepartmentFilterToggle = () => {
+    try {
+      const newValue = !departmentFilterEnabled;
+      localStorage.setItem('departmentFilterEnabled', String(newValue));
+      setDepartmentFilterEnabled(newValue);
+      
+      // Dispatch event to notify other pages
+      window.dispatchEvent(new CustomEvent('departmentFilterSettingChanged', {
+        detail: { enabled: newValue }
+      }));
+      
+      setMessage('Department filter setting updated successfully!');
+      setTimeout(() => setMessage(''), 3000);
+    } catch (err) {
+      console.error('Error toggling department filter:', err);
+      setError('Failed to update department filter setting. Please try again.');
       setTimeout(() => setError(''), 5000);
     }
   };
@@ -94,12 +132,40 @@ function SettingsPage() {
             </button>
           </div>
         </div>
+
+        {/* Department Filter Toggle */}
+        <div className="bg-gray-50 dark:bg-gray-700 rounded-lg p-6">
+          <h3 className="text-lg font-semibold text-gray-800 dark:text-white mb-4 flex items-center gap-2">
+            <svg className="w-5 h-5 text-theme-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
+            </svg>
+            Department Filter
+          </h3>
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-gray-700 dark:text-gray-300 font-medium">Show Only My Department</p>
+              <p className="text-sm text-gray-500 dark:text-gray-400">Filter deadlines to show only tasks in your department (Dashboard, Sort Deadlines, Calendar, and Gantt pages only)</p>
+            </div>
+            <button
+              onClick={handleDepartmentFilterToggle}
+              className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors duration-200 focus:outline-none focus:ring-2 focus:ring-theme-primary focus:ring-offset-2 ${
+                departmentFilterEnabled ? 'bg-theme-primary' : 'bg-gray-200 dark:bg-gray-600'
+              }`}
+            >
+              <span
+                className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform duration-200 ${
+                  departmentFilterEnabled ? 'translate-x-6' : 'translate-x-1'
+                }`}
+              />
+            </button>
+          </div>
+        </div>
         
         {/* Version Number - Subtle display at bottom */}
         <div className="mt-8 pt-4 border-t border-gray-200 dark:border-gray-600">
           <div className="text-center">
             <p className="text-xs text-gray-400 dark:text-gray-500">
-              Version v.2.2.0
+              Version v3.1.26
             </p>
           </div>
         </div>

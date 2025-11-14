@@ -5,31 +5,71 @@ import {
   CheckCircleIcon,
   ExclamationTriangleIcon
 } from '@heroicons/react/24/outline';
-import { globalTaskStore } from './globalTaskStore';
+import { azureTaskService } from './services/azureTaskService';
+import { microsoftDataService } from './microsoftDataService';
 import TaskCard from './TaskCard';
 import { format, parseISO, startOfWeek, endOfWeek, isWithinInterval, isSameDay, addDays, subDays } from 'date-fns';
+import { filterDeadlineTasks, getTaskDeadline, parseDeadlineDate } from './utils/taskHelpers';
 
 function CalendarDeadlinesPage() {
   const [tasks, setTasks] = useState([]);
+  const [users, setUsers] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
   const [currentDate, setCurrentDate] = useState(new Date());
   const [viewMode, setViewMode] = useState('month'); // 'week', 'month'
 
-  // Subscribe to global task store
+  // Load tasks and users from Azure Functions API
   useEffect(() => {
-    const unsubscribe = globalTaskStore.subscribe(({ tasks, isLoading }) => {
-      setTasks(tasks);
-      setIsLoading(isLoading);
-    });
+    const loadData = async () => {
+      try {
+        setIsLoading(true);
+        const [loadedTasks, usersData] = await Promise.all([
+          azureTaskService.loadAllTasks({ useCache: false }).catch(err => {
+            console.error('Calendar: Error loading tasks:', err);
+            return [];
+          }),
+          microsoftDataService.users.getEnterpriseUsers().catch(err => {
+            console.error('Calendar: Error loading users:', err);
+            return [];
+          })
+        ]);
+        // Filter out recurring templates - only show actual deadline instances
+        const deadlineTasks = filterDeadlineTasks(Array.isArray(loadedTasks) ? loadedTasks : []);
+        setTasks(deadlineTasks);
+        
+        // Merge enterprise users with local assignments (same as Dashboard)
+        const USER_ASSIGNMENTS_KEY = 'user_assignments';
+        const localAssignments = JSON.parse(localStorage.getItem(USER_ASSIGNMENTS_KEY) || '{}');
+        
+        const usersWithAssignments = (Array.isArray(usersData) ? usersData : []).map(user => ({
+          ...user,
+          departments: localAssignments[user.id]?.departments || [],
+          role: localAssignments[user.id]?.role || 'VIEWER'
+        }));
+        
+        setUsers(usersWithAssignments);
+      } catch (err) {
+        console.error('Calendar: Error loading data:', err);
+        setTasks([]);
+        setUsers([]);
+      } finally {
+        setIsLoading(false);
+      }
+    };
 
-    // Get initial tasks from store
-    const initialTasks = globalTaskStore.getAllTasks();
-    if (initialTasks.length > 0) {
-      setTasks(initialTasks);
-      setIsLoading(false);
-    }
-
-    return () => unsubscribe();
+    loadData();
+    
+    // Poll for updates every 30 seconds
+    const interval = setInterval(async () => {
+      try {
+        const loadedTasks = await azureTaskService.loadAllTasks({ useCache: false });
+        const deadlineTasks = filterDeadlineTasks(Array.isArray(loadedTasks) ? loadedTasks : []);
+        setTasks(deadlineTasks);
+      } catch (err) {
+        console.error('Calendar: Error polling for updates:', err);
+      }
+    }, 30000);
+    return () => clearInterval(interval);
   }, []);
 
   // Get tasks for the current view
@@ -45,15 +85,9 @@ function CalendarDeadlinesPage() {
       : new Date(currentDate.getFullYear(), currentDate.getMonth() + 1, 0);
 
     return tasks.filter(task => {
-      if (!task.deadline) return false;
-      
-      try {
-        const taskDate = parseISO(task.deadline);
-        return isWithinInterval(taskDate, { start: startDate, end: endDate });
-      } catch (error) {
-        console.warn('Calendar: Error parsing task deadline:', task.deadline, error);
-        return false;
-      }
+      const deadline = parseDeadlineDate(getTaskDeadline(task));
+      if (!deadline) return false;
+      return isWithinInterval(deadline, { start: startDate, end: endDate });
     });
   }, [tasks, currentDate, viewMode]);
 
@@ -62,17 +96,14 @@ function CalendarDeadlinesPage() {
     const grouped = {};
     
     getTasksForView.forEach(task => {
-      try {
-        const taskDate = parseISO(task.deadline);
-        const dateKey = format(taskDate, 'yyyy-MM-dd');
-        
-        if (!grouped[dateKey]) {
-          grouped[dateKey] = [];
-        }
-        grouped[dateKey].push(task);
-      } catch (error) {
-        console.warn('Calendar: Error grouping task by date:', task.deadline, error);
+      const taskDate = parseDeadlineDate(getTaskDeadline(task));
+      if (!taskDate) return;
+      const dateKey = format(taskDate, 'yyyy-MM-dd');
+      
+      if (!grouped[dateKey]) {
+        grouped[dateKey] = [];
       }
+      grouped[dateKey].push(task);
     });
 
     return grouped;
@@ -258,7 +289,7 @@ function CalendarDeadlinesPage() {
                           key={`${task.id}-${taskIndex}`}
                           className="text-xs p-1 rounded bg-blue-100 dark:bg-blue-900/30 text-blue-800 dark:text-blue-200 truncate"
                         >
-                          {task.task || 'Untitled Task'}
+                          {task.title || task.task || 'Untitled Task'}
                         </div>
                       ))}
                       {day.tasks.length > 3 && (
@@ -284,18 +315,16 @@ function CalendarDeadlinesPage() {
               <div className="space-y-3 max-h-[600px] overflow-y-auto">
                 {getTasksForView
                   .sort((a, b) => {
-                    try {
-                      const dateA = parseISO(a.deadline);
-                      const dateB = parseISO(b.deadline);
-                      return dateA - dateB;
-                    } catch (error) {
-                      return 0;
-                    }
+                    const dateA = parseDeadlineDate(getTaskDeadline(a));
+                    const dateB = parseDeadlineDate(getTaskDeadline(b));
+                    if (!dateA || !dateB) return 0;
+                    return dateA - dateB;
                   })
                   .map(task => (
                     <TaskCard
                       key={task.id}
                       task={task}
+                      users={users}
                       className="hover:shadow-md transition-shadow"
                     />
                   ))}
