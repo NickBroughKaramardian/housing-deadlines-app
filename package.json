@@ -1,6 +1,6 @@
 {
   "name": "c-and-c-project-manager",
-  "version": "2.2.0",
+  "version": "3.1.26",
   "private": true,
   "dependencies": {
     "@azure/msal-browser": "^2.34.0",
@@ -20,7 +20,9 @@
     "build": "react-scripts build",
     "test": "react-scripts test",
     "eject": "react-scripts eject",
-    "prod": "npm run build"
+    "prod": "npm run build",
+    "backup": "node create-backup.js",
+    "backup:version": "node create-backup.js"
   },
   "eslintConfig": {
     "extends": [

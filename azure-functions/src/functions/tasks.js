@@ -2,11 +2,10 @@ const { app } = require('@azure/functions');
 const db = require('../database');
 
 function corsHeaders() {
+  // CORS is handled automatically by Azure portal configuration
+  // Only include non-CORS headers here to avoid conflicts
   return {
     'Content-Type': 'application/json',
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
   };
 }
 
@@ -82,9 +81,11 @@ app.http('deleteTask', {
 });
 
 // OPTIONS /api/tasks (CORS preflight)
+// Note: Azure portal CORS configuration handles OPTIONS requests automatically
+// This handler is kept for compatibility but CORS headers are handled by Azure
 app.http('optionsTasks', {
   methods: ['OPTIONS'],
   authLevel: 'anonymous',
   route: 'tasks',
-  handler: async () => ({ status: 200, headers: { ...corsHeaders(), 'Access-Control-Max-Age': '86400' }, body: '' }),
+  handler: async () => ({ status: 200, headers: corsHeaders(), body: '' }),
 });
