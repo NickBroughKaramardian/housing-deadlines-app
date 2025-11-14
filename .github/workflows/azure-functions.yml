@@ -20,11 +20,31 @@ jobs:
 
       - name: Install dependencies (Functions)
         working-directory: azure-functions
-        run: npm install --no-audit --no-fund
+        run: |
+          # Clean install to fix corrupted node_modules
+          rm -rf node_modules package-lock.json
+          npm install --no-audit --no-fund
+          # Verify critical dependencies are installed
+          npm list mssql @azure/functions 2>&1 | head -10
 
       - name: Install Azure Functions Core Tools
         run: |
           npm install -g azure-functions-core-tools@4 --unsafe-perm true
+
+      - name: Verify deployment structure
+        working-directory: azure-functions
+        run: |
+          echo "=== Verifying deployment structure ==="
+          echo "Checking index.js exists:"
+          ls -la index.js || echo "ERROR: index.js not found!"
+          echo "Checking package.json main field:"
+          grep '"main"' package.json || echo "ERROR: main field not found!"
+          echo "Checking host.json exists:"
+          ls -la host.json || echo "ERROR: host.json not found!"
+          echo "Checking critical dependencies:"
+          ls -la node_modules/mssql || echo "ERROR: mssql not found!"
+          ls -la node_modules/@azure/functions || echo "ERROR: @azure/functions not found!"
+          echo "=== Structure verification complete ==="
 
       - name: Deploy to Azure Functions using func
         working-directory: azure-functions
@@ -32,6 +52,7 @@ jobs:
           echo "${{ secrets.AZURE_FUNCTIONAPP_PUBLISH_PROFILE }}" | base64 -d > publish-profile.xml
           # Use local build to ensure entry point discovery works correctly
           # Remote build may not preserve the v4 programming model structure
-          func azure functionapp publish ${{ secrets.AZURE_FUNCTIONAPP_NAME }} --build local --publish-profile-file publish-profile.xml
+          # Adding --force to ensure clean deployment
+          func azure functionapp publish ${{ secrets.AZURE_FUNCTIONAPP_NAME }} --build local --force --publish-profile-file publish-profile.xml
 
 
