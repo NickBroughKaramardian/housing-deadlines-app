@@ -26,9 +26,15 @@ jobs:
         run: |
           npm install -g azure-functions-core-tools@4 --unsafe-perm true
 
+      - name: Setup Azure Functions Core Tools
+        run: |
+          echo "${{ secrets.AZURE_FUNCTIONAPP_PUBLISH_PROFILE }}" > /tmp/publish-profile.xml
+
       - name: Deploy to Azure Functions
         working-directory: azure-functions
         run: |
           func azure functionapp publish ${{ secrets.AZURE_FUNCTIONAPP_NAME }} --build remote --javascript
+        env:
+          AZURE_FUNCTIONAPP_PUBLISH_PROFILE: ${{ secrets.AZURE_FUNCTIONAPP_PUBLISH_PROFILE }}
 
 
