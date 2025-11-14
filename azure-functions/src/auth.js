@@ -1,11 +1,11 @@
 const { DefaultAzureCredential } = require('@azure/identity');
 
 // Simple auth middleware for Azure Functions
-function authenticateRequest(req) {
+function authenticateRequest(request) {
   // In production, you'd validate the JWT token from the frontend
   // For now, we'll extract user info from headers or use a simple approach
   
-  const authHeader = req.headers.authorization;
+  const authHeader = request.headers?.authorization || request.headers?.get?.('authorization');
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
     throw new Error('No valid authorization header');
   }
@@ -23,15 +23,16 @@ function authenticateRequest(req) {
 }
 
 function requireAuth(handler) {
-  return async (context, req) => {
+  return async (request, context) => {
     try {
-      const user = authenticateRequest(req);
-      req.user = user;
-      return await handler(context, req);
+      const user = authenticateRequest(request);
+      request.user = user;
+      return await handler(request, context);
     } catch (error) {
-      context.res = {
+      return {
         status: 401,
-        body: { error: 'Unauthorized', message: error.message }
+        headers: { 'Content-Type': 'application/json' },
+        jsonBody: { error: 'Unauthorized', message: error.message }
       };
     }
   };

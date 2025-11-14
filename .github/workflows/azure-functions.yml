@@ -30,6 +30,8 @@ jobs:
         working-directory: azure-functions
         run: |
           echo "${{ secrets.AZURE_FUNCTIONAPP_PUBLISH_PROFILE }}" | base64 -d > publish-profile.xml
-          func azure functionapp publish ${{ secrets.AZURE_FUNCTIONAPP_NAME }} --build remote --javascript --publish-profile-file publish-profile.xml
+          # Use local build to ensure entry point discovery works correctly
+          # Remote build may not preserve the v4 programming model structure
+          func azure functionapp publish ${{ secrets.AZURE_FUNCTIONAPP_NAME }} --build local --publish-profile-file publish-profile.xml
 
 
