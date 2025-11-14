@@ -165,7 +165,7 @@ function SettingsPage() {
         <div className="mt-8 pt-4 border-t border-gray-200 dark:border-gray-600">
           <div className="text-center">
             <p className="text-xs text-gray-400 dark:text-gray-500">
-              Version v3.1.33
+              Version v3.1.34
             </p>
           </div>
         </div>
