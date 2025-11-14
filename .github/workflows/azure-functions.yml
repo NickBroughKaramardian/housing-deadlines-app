@@ -26,14 +26,10 @@ jobs:
         run: |
           npm install -g azure-functions-core-tools@4 --unsafe-perm true
 
-      - name: Azure Login
-        uses: azure/login@v1
-        with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
-
-      - name: Deploy to Azure Functions
+      - name: Deploy to Azure Functions using func
         working-directory: azure-functions
         run: |
-          func azure functionapp publish ${{ secrets.AZURE_FUNCTIONAPP_NAME }} --build remote --javascript
+          echo "${{ secrets.AZURE_FUNCTIONAPP_PUBLISH_PROFILE }}" | base64 -d > publish-profile.xml
+          func azure functionapp publish ${{ secrets.AZURE_FUNCTIONAPP_NAME }} --build remote --javascript --publish-profile-file publish-profile.xml
 
 
