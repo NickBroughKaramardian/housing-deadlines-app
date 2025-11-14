@@ -1,5 +1,13 @@
 const { app } = require('@azure/functions');
-const db = require('../database');
+// LAZY LOAD: Don't require database at module load time
+// This allows functions to register even if database dependencies are corrupted
+let db = null;
+function getDb() {
+  if (!db) {
+    db = require('../database');
+  }
+  return db;
+}
 
 function corsHeaders() {
   // CORS is handled automatically by Azure portal configuration
@@ -16,7 +24,7 @@ app.http('getTasks', {
   route: 'tasks',
   handler: async () => {
     try {
-      const tasks = await db.queryTasks();
+      const tasks = await getDb().queryTasks();
       return { status: 200, headers: corsHeaders(), jsonBody: { success: true, data: tasks, count: tasks.length } };
     } catch (err) {
       return { status: 500, headers: corsHeaders(), jsonBody: { error: 'Failed to get tasks', message: String(err?.message || err) } };
@@ -35,7 +43,7 @@ app.http('createTask', {
       if (!body?.title || !body?.deadline_date) {
         return { status: 400, headers: corsHeaders(), jsonBody: { error: 'title and deadline_date are required' } };
       }
-      const task = await db.createTask(body);
+      const task = await getDb().createTask(body);
       return { status: 201, headers: corsHeaders(), jsonBody: { success: true, data: task } };
     } catch (err) {
       return { status: 500, headers: corsHeaders(), jsonBody: { error: 'Failed to create task', message: String(err?.message || err) } };
@@ -54,7 +62,7 @@ app.http('updateTask', {
       const id = url.searchParams.get('id');
       if (!id) return { status: 400, headers: corsHeaders(), jsonBody: { error: 'id is required' } };
       const updates = await request.json();
-      const updated = await db.updateTask(id, updates);
+      const updated = await getDb().updateTask(id, updates);
       return { status: 200, headers: corsHeaders(), jsonBody: { success: true, data: updated } };
     } catch (err) {
       return { status: 500, headers: corsHeaders(), jsonBody: { error: 'Failed to update task', message: String(err?.message || err) } };
@@ -72,7 +80,7 @@ app.http('deleteTask', {
       const url = new URL(request.url);
       const id = url.searchParams.get('id');
       if (!id) return { status: 400, headers: corsHeaders(), jsonBody: { error: 'id is required' } };
-      await db.deleteTask(id);
+      await getDb().deleteTask(id);
       return { status: 204, headers: corsHeaders(), body: '' };
     } catch (err) {
       return { status: 500, headers: corsHeaders(), jsonBody: { error: 'Failed to delete task', message: String(err?.message || err) } };
