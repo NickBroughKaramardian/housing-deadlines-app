@@ -1,7 +1,21 @@
-const sql = require('mssql');
-const { DefaultAzureCredential } = require('@azure/identity');
-
+// LAZY LOAD: Don't require mssql at module load time
+// This allows functions to register even if mssql dependencies are corrupted
+let sql = null;
+let DefaultAzureCredential = null;
 let pool = null;
+
+function lazyLoadMssql() {
+  if (!sql) {
+    try {
+      sql = require('mssql');
+      DefaultAzureCredential = require('@azure/identity');
+    } catch (err) {
+      console.error('Failed to load mssql module:', err);
+      throw new Error('Database module (mssql) is not available. Please check node_modules installation.');
+    }
+  }
+  return { sql, DefaultAzureCredential };
+}
 
 const config = {
   server: process.env.AZURE_SQL_SERVER || 'your-server.database.windows.net',
@@ -16,9 +30,12 @@ const config = {
 };
 
 async function getPool() {
+  // Lazy load mssql only when actually needed
+  const { sql: mssql } = lazyLoadMssql();
+  
   if (!pool) {
     try {
-      pool = await sql.connect(config);
+      pool = await mssql.connect(config);
       console.log('Connected to Azure SQL Database');
     } catch (err) {
       console.error('Database connection failed:', err);
