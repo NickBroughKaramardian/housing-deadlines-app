@@ -1,19 +1,24 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import { 
   FunnelIcon, 
   MagnifyingGlassIcon,
   CalendarDaysIcon,
   UserIcon,
   FolderIcon,
-  CheckCircleIcon,
-  ExclamationTriangleIcon,
-  ClockIcon
+  PlusIcon,
+  MinusIcon
 } from '@heroicons/react/24/outline';
 import { format, parseISO, isValid } from 'date-fns';
-import { globalTaskStore } from './globalTaskStore';
+import { taskManager } from './services/taskManager';
 import { microsoftDataService } from './microsoftDataService';
 import TaskCard from './TaskCard';
-import taskService from './taskService';
+import NoteModal from './components/NoteModal';
+import DeleteConfirmModal from './components/DeleteConfirmModal';
+import { getTaskDeadline, parseDeadlineDate, filterDeadlineTasks, getTaskStatus, getStatusColor, getVisibleTasks } from './utils/taskHelpers';
+import { useAuth } from './Auth';
+import { DEPARTMENTS } from './microsoftAuthService';
+import { getDepartmentDisplayName, getDepartmentColor } from './utils/departmentColors';
+import { useUserDepartments } from './contexts/UserDepartmentsContext';
 // Removed taskUpdateService - using taskService instead
 
 function SortDeadlinesPage() {
@@ -22,16 +27,170 @@ function SortDeadlinesPage() {
   const [loading, setLoading] = useState(true);
   const [updating, setUpdating] = useState(false);
   const [activeFilter, setActiveFilter] = useState('active');
-  const [sortBy, setSortBy] = useState('deadline');
-  const [sortOrder, setSortOrder] = useState('asc');
+  const [sortBars, setSortBars] = useState([{ id: 1, sortBy: 'deadline', sortOrder: 'asc' }]);
+  
+  // Get user's departments from context
+  const { isFilterActive, userDepartments, getAccessibleDepartments } = useUserDepartments();
+  // Filters array - one filter object per sort bar
+  const [filters, setFilters] = useState([
+    {
+      deadlineYear: '',
+      deadlineMonth: '',
+      deadlineDay: '',
+      responsibleParty: '',
+      department: [],
+      project: '',
+      search: ''
+    }
+  ]);
+  // Legacy state for backward compatibility (will be removed)
   const [secondaryFilter, setSecondaryFilter] = useState('');
   const [deadlineYear, setDeadlineYear] = useState('');
   const [deadlineMonth, setDeadlineMonth] = useState('');
   const [deadlineDay, setDeadlineDay] = useState('');
   const [selectedDepartments, setSelectedDepartments] = useState([]);
+  
+  // Modal states
+  const [noteModal, setNoteModal] = useState({ isOpen: false, task: null });
+  const [deleteModal, setDeleteModal] = useState({ isOpen: false, taskId: null, taskName: null });
+  
+  const { userProfile } = useAuth();
 
-  // Toggle task completion - uses simple SharePoint service
-  const toggleTaskCompletion = async (taskId, currentStatus, shouldUpdateAll = false) => {
+  // Handlers for multiple sort bars
+  const addSortBar = () => {
+    if (sortBars.length < 4) {
+      const newId = Math.max(...sortBars.map(b => b.id || 0), 0) + 1;
+      setSortBars([...sortBars, { id: newId, sortBy: 'deadline', sortOrder: 'asc' }]);
+      // Add corresponding filter
+      setFilters([...filters, {
+        deadlineYear: '',
+        deadlineMonth: '',
+        deadlineDay: '',
+        responsibleParty: '',
+        department: [],
+        project: '',
+        search: ''
+      }]);
+    }
+  };
+
+  const removeSortBar = (index) => {
+    if (sortBars.length > 1 && index > 0) {
+      const newSortBars = sortBars.filter((_, i) => i !== index);
+      setSortBars(newSortBars);
+      // Remove corresponding filter
+      const newFilters = filters.filter((_, i) => i !== index);
+      setFilters(newFilters);
+      // Clear legacy filter state if removing the first bar
+      if (index === 0) {
+        setSecondaryFilter('');
+        setDeadlineYear('');
+        setDeadlineMonth('');
+        setDeadlineDay('');
+        setSelectedDepartments([]);
+      }
+    }
+  };
+
+  const updateSortBar = (index, field, value) => {
+    const newSortBars = [...sortBars];
+    newSortBars[index] = { ...newSortBars[index], [field]: value };
+    setSortBars(newSortBars);
+    // Clear filter when sort bar type changes
+    if (field === 'sortBy') {
+      const newFilters = [...filters];
+      newFilters[index] = {
+        deadlineYear: '',
+        deadlineMonth: '',
+        deadlineDay: '',
+        responsibleParty: '',
+        department: [],
+        project: '',
+        search: ''
+      };
+      setFilters(newFilters);
+      // Clear legacy filter state when first sort bar type changes
+      if (index === 0) {
+        setSecondaryFilter('');
+        setDeadlineYear('');
+        setDeadlineMonth('');
+        setDeadlineDay('');
+        setSelectedDepartments([]);
+      }
+    }
+  };
+
+  // Update filter for a specific sort bar
+  const updateFilter = (index, field, value) => {
+    const newFilters = [...filters];
+    if (field === 'department') {
+      // Handle department array toggle
+      const currentDepts = newFilters[index].department || [];
+      if (Array.isArray(value)) {
+        newFilters[index] = { ...newFilters[index], department: value };
+      } else {
+        // Toggle department
+        const deptIndex = currentDepts.indexOf(value);
+        if (deptIndex >= 0) {
+          newFilters[index].department = currentDepts.filter(d => d !== value);
+        } else {
+          newFilters[index].department = [...currentDepts, value];
+        }
+      }
+    } else {
+      newFilters[index] = { ...newFilters[index], [field]: value };
+    }
+    setFilters(newFilters);
+  };
+
+  const loadTasks = useCallback(async (forceRefresh = false) => {
+    try {
+      setLoading(true);
+
+      if (forceRefresh || !taskManager.isInitialized) {
+        await taskManager.initialize(forceRefresh);
+      }
+
+      const allTasks = taskManager.getAllTasks();
+      const deadlineTasks = filterDeadlineTasks(allTasks);
+      setTasks(deadlineTasks);
+    } catch (error) {
+      console.error('SortDeadlines: Error loading tasks:', error);
+      setTasks([]);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  // Check for pending project filter from Portfolio page
+  useEffect(() => {
+    const pendingFilter = sessionStorage.getItem('pendingProjectFilter');
+    if (pendingFilter) {
+      // Pre-fill the project filter in the first sort bar
+      setFilters(prev => {
+        const newFilters = [...prev];
+        if (newFilters[0]) {
+          newFilters[0] = { ...newFilters[0], project: pendingFilter };
+        }
+        return newFilters;
+      });
+      // Also set the sort by to project if not already
+      if (sortBars[0] && sortBars[0].sortBy !== 'project') {
+        setSortBars(prev => {
+          const newBars = [...prev];
+          if (newBars[0]) {
+            newBars[0] = { ...newBars[0], sortBy: 'project' };
+          }
+          return newBars;
+        });
+      }
+      // Clear the session storage
+      sessionStorage.removeItem('pendingProjectFilter');
+    }
+  }, []); // Run once on mount
+
+  // Toggle task completion using TaskManager
+  const toggleTaskCompletion = useCallback(async (taskId, currentStatus, shouldUpdateAll = false) => {
     const newStatus = !currentStatus;
     
     try {
@@ -42,25 +201,29 @@ function SortDeadlinesPage() {
         const currentTask = tasks.find(t => t.id === taskId);
         if (currentTask) {
           const relatedTasks = tasks.filter(t => 
-            t.Task === currentTask.Task && 
-            t.Project === currentTask.Project
+            (t.Task || t.title || t.task) === (currentTask.Task || currentTask.title || currentTask.task) && 
+            (t.Project || t.project) === (currentTask.Project || currentTask.project)
           );
           
-          // Update all related tasks
-          for (const task of relatedTasks) {
-            await taskService.updateTaskField(task.id, 'Completed_x003f_', newStatus);
-          }
+          // Use TaskManager batch update
+          await taskManager.batchUpdate(
+            relatedTasks.map(task => ({ id: task.id, updates: { completed: newStatus } }))
+          );
           
           console.log('SortDeadlines: Updated completion for', relatedTasks.length, 'related tasks');
         }
       } else {
-        // Update only this task
-        await taskService.updateTaskField(taskId, 'Completed_x003f_', newStatus);
+        // Update only this task using TaskManager
+        const existingTask = taskManager.getTaskById(taskId);
+        if (existingTask) {
+          await taskManager.updateTask(taskId, { 
+            ...existingTask,
+            completed: newStatus 
+          });
+        } else {
+          await taskManager.updateTask(taskId, { completed: newStatus });
+        }
       }
-      
-      // Update global store
-      const allTasks = await taskService.getAllTasks();
-      globalTaskStore.setAllTasks(allTasks);
       
       console.log('SortDeadlines: Task completion updated successfully');
     } catch (error) {
@@ -68,11 +231,116 @@ function SortDeadlinesPage() {
     } finally {
       setUpdating(false);
     }
-  };
+  }, [tasks]);
 
-  // Toggle task urgency - uses task service
-  const toggleTaskUrgency = async (taskId, currentUrgency, shouldUpdateAll = false) => {
-    const newUrgency = !currentUrgency;
+  useEffect(() => {
+    loadTasks(true);
+
+    const unsubscribe = taskManager.subscribe(({ type }) => {
+      if (type === 'refreshed' || type === 'created' || type === 'updated' || type === 'deleted' || type === 'batchCreated' || type === 'batchUpdated' || type === 'batchDeleted') {
+        const allTasks = taskManager.getAllTasks();
+        setTasks(filterDeadlineTasks(allTasks));
+      }
+      if (type === 'loading') {
+        setLoading(taskManager.isLoading);
+      }
+    });
+
+    const handleTaskDataChanged = (event) => {
+      const { type } = event.detail;
+      if (type === 'refreshed' || type === 'created' || type === 'updated' || type === 'deleted' || type === 'batchCreated' || type === 'batchUpdated' || type === 'batchDeleted') {
+        const allTasks = taskManager.getAllTasks();
+        setTasks(filterDeadlineTasks(allTasks));
+      }
+    };
+
+    window.addEventListener('taskDataChanged', handleTaskDataChanged);
+
+    return () => {
+      unsubscribe();
+      window.removeEventListener('taskDataChanged', handleTaskDataChanged);
+    };
+  }, [loadTasks]);
+
+  // Action handlers for TaskCard
+  const handleToggleComplete = useCallback(async (taskId, currentStatus) => {
+    try {
+      const existingTask = taskManager.getTaskById(taskId);
+      if (existingTask) {
+        await taskManager.updateTask(taskId, { 
+          ...existingTask,
+          completed: !currentStatus 
+        });
+      } else {
+        await taskManager.updateTask(taskId, { completed: !currentStatus });
+      }
+    } catch (error) {
+      console.error('SortDeadlines: Error toggling completion:', error);
+    }
+  }, []);
+
+  const handleToggleUrgent = useCallback(async (taskId, currentUrgency) => {
+    try {
+      const existingTask = taskManager.getTaskById(taskId);
+      if (existingTask) {
+        await taskManager.updateTask(taskId, {
+          ...existingTask,
+          priority: currentUrgency ? 'Normal' : 'Urgent'
+        });
+      } else {
+        await taskManager.updateTask(taskId, { priority: currentUrgency ? 'Normal' : 'Urgent' });
+      }
+      // Ensure list and badge counts refresh so Urgent tab/counter update immediately
+      setTasks(filterDeadlineTasks(taskManager.getAllTasks()));
+    } catch (error) {
+      console.error('SortDeadlines: Error toggling urgency:', error);
+    }
+  }, []);
+
+  const handleNoteClick = useCallback((task) => {
+    setNoteModal({ isOpen: true, task });
+  }, []);
+
+  const handleNoteSave = useCallback(async (taskId, noteContent) => {
+    try {
+      const existingTask = taskManager.getTaskById(taskId);
+      if (existingTask) {
+        await taskManager.updateTask(taskId, { 
+          ...existingTask,
+          note: noteContent 
+        });
+      } else {
+        await taskManager.updateTask(taskId, { note: noteContent });
+      }
+      setNoteModal({ isOpen: false, task: null });
+    } catch (error) {
+      console.error('SortDeadlines: Error saving note:', error);
+    }
+  }, []);
+
+  const handleDeleteClick = useCallback((taskId, task) => {
+    setDeleteModal({ 
+      isOpen: true, 
+      taskId, 
+      taskName: task.title || task.task || task.Task || 'this task' 
+    });
+  }, []);
+
+  const handleDeleteConfirm = useCallback(async () => {
+    if (!deleteModal.taskId) return;
+    
+    try {
+      await taskManager.deleteTask(deleteModal.taskId);
+      setDeleteModal({ isOpen: false, taskId: null, taskName: null });
+    } catch (error) {
+      console.error('SortDeadlines: Error deleting task:', error);
+      setDeleteModal({ isOpen: false, taskId: null, taskName: null });
+    }
+  }, [deleteModal]);
+
+  // Toggle task urgency using TaskManager (legacy - keeping for compatibility)
+  const toggleTaskUrgency = useCallback(async (taskId, currentUrgency, shouldUpdateAll = false) => {
+    const newPriority = currentUrgency ? 'Normal' : 'Urgent';
     
     try {
       setUpdating(true);
@@ -82,25 +350,29 @@ function SortDeadlinesPage() {
         const currentTask = tasks.find(t => t.id === taskId);
         if (currentTask) {
           const relatedTasks = tasks.filter(t => 
-            t.Task === currentTask.Task && 
-            t.Project === currentTask.Project
+            (t.Task || t.title || t.task) === (currentTask.Task || currentTask.title || currentTask.task) && 
+            (t.Project || t.project) === (currentTask.Project || currentTask.project)
           );
           
-          // Update all related tasks
-          for (const task of relatedTasks) {
-            await taskService.updateTaskField(task.id, 'Priority', newUrgency);
-          }
+          // Use TaskManager batch update
+          await taskManager.batchUpdate(
+            relatedTasks.map(task => ({ id: task.id, updates: { priority: newPriority } }))
+          );
           
           console.log('SortDeadlines: Updated urgency for', relatedTasks.length, 'related tasks');
         }
       } else {
-        // Update only this task
-        await taskService.updateTaskField(taskId, 'Priority', newUrgency);
+        // Update only this task using TaskManager
+        const existingTask = taskManager.getTaskById(taskId);
+        if (existingTask) {
+          await taskManager.updateTask(taskId, { 
+            ...existingTask,
+            priority: newPriority 
+          });
+        } else {
+          await taskManager.updateTask(taskId, { priority: newPriority });
+        }
       }
-      
-      // Update global store
-      const allTasks = await taskService.getAllTasks();
-      globalTaskStore.setAllTasks(allTasks);
       
       console.log('SortDeadlines: Task urgency updated successfully');
     } catch (error) {
@@ -108,78 +380,74 @@ function SortDeadlinesPage() {
     } finally {
       setUpdating(false);
     }
-  };
+  }, [tasks]);
 
-  // Delete task - uses task service
-  const deleteTask = async (taskId) => {
+  // Delete task using TaskManager
+  const deleteTask = useCallback(async (taskId) => {
     try {
       setUpdating(true);
-      await taskService.deleteTask(taskId);
-      
-      // Update global store
-      const allTasks = await taskService.getAllTasks();
-      globalTaskStore.setAllTasks(allTasks);
-      setTasks(allTasks);
-      
+      await taskManager.deleteTask(taskId);
       console.log('SortDeadlines: Task deleted successfully');
     } catch (error) {
       console.error('SortDeadlines: Error deleting task:', error);
     } finally {
       setUpdating(false);
     }
-  };
+  }, []);
 
-  // Load tasks, instances, and users
+  // Load users
   useEffect(() => {
-    const loadData = async () => {
+    const loadUsers = async () => {
       try {
-        setLoading(true);
-        
-        // Subscribe to global task store updates
-        const unsubscribe = globalTaskStore.subscribe(() => {
-          const allTasks = globalTaskStore.getAllTasks();
-          setTasks(allTasks);
-          console.log('SortDeadlines: Updated from global store -', allTasks.length, 'total items');
-        });
-        
-        // Get initial data
-        const [allTasks, usersData] = await Promise.all([
-          taskService.getAllTasks(),
-          microsoftDataService.users.getEnterpriseUsers()
-        ]);
+        const usersData = await microsoftDataService.users.getEnterpriseUsers();
         
         // Load local assignments from localStorage and merge with users (same as Dashboard)
         const USER_ASSIGNMENTS_KEY = 'user_assignments';
         const localAssignments = JSON.parse(localStorage.getItem(USER_ASSIGNMENTS_KEY) || '{}');
         
         // Merge enterprise users with local assignments
-        const usersWithAssignments = usersData.map(user => ({
+        const usersWithAssignments = (Array.isArray(usersData) ? usersData : []).map(user => ({
           ...user,
           departments: localAssignments[user.id]?.departments || [],
           role: localAssignments[user.id]?.role || 'VIEWER'
         }));
         
-        setTasks(allTasks);
         setUsers(usersWithAssignments);
-        console.log('SortDeadlines: Loaded', allTasks.length, 'total items and', usersWithAssignments.length, 'users with assignments');
-        console.log('SortDeadlines: Users with departments:', usersWithAssignments.map(u => ({
-          id: u.id,
-          email: u.email || u.mail || u.userPrincipalName,
-          displayName: u.displayName || u.DisplayName,
-          departments: u.departments,
-          role: u.role
-        })));
-        
-        return unsubscribe;
-      } catch (error) {
-        console.error('SortDeadlines: Error loading data:', error);
-      } finally {
-        setLoading(false);
+      } catch (err) {
+        console.error('SortDeadlines: Error loading users:', err);
+        setUsers([]);
       }
     };
     
-    loadData();
+    loadUsers();
+    
+    // Listen for department/role changes and refresh users in background
+    const handleUserChange = async () => {
+      console.log('SortDeadlines: User departments/roles changed, refreshing users...');
+      try {
+        const usersData = await microsoftDataService.users.getEnterpriseUsers();
+        const USER_ASSIGNMENTS_KEY = 'user_assignments';
+        const localAssignments = JSON.parse(localStorage.getItem(USER_ASSIGNMENTS_KEY) || '{}');
+        const usersWithAssignments = (Array.isArray(usersData) ? usersData : []).map(user => ({
+          ...user,
+          departments: localAssignments[user.id]?.departments || [],
+          role: localAssignments[user.id]?.role || 'VIEWER'
+        }));
+        setUsers(usersWithAssignments);
+      } catch (err) {
+        console.error('SortDeadlines: Error refreshing users:', err);
+      }
+    };
+
+    window.addEventListener('userDepartmentsChanged', handleUserChange);
+    window.addEventListener('userRoleChanged', handleUserChange);
+    
+    return () => {
+      window.removeEventListener('userDepartmentsChanged', handleUserChange);
+      window.removeEventListener('userRoleChanged', handleUserChange);
+    };
   }, []);
+
 
   // Parse deadline date helper
   const parseDeadlineDate = (dateStr) => {
@@ -269,7 +537,176 @@ function SortDeadlinesPage() {
            search.includes(monthDayYear.toLowerCase());
   };
 
-  // Helper function for separate deadline search fields
+  // Helper function to check if a task matches a specific filter
+  const taskMatchesFilter = (task, filter, sortBy) => {
+    if (!filter) return true;
+    
+    switch (sortBy) {
+      case 'deadline': {
+        const deadline = getTaskDeadline(task);
+        if (!deadline) return !filter.deadlineYear && !filter.deadlineMonth && !filter.deadlineDay;
+        
+        const date = parseDeadlineDate(deadline);
+        if (!date) return false;
+
+        // If no filters are set, show all
+        if (!filter.deadlineYear && !filter.deadlineMonth && !filter.deadlineDay) return true;
+        
+        // Check year
+        if (filter.deadlineYear) {
+          const year = date.getFullYear().toString();
+          if (!year.includes(filter.deadlineYear) && !filter.deadlineYear.includes(year)) {
+            return false;
+          }
+        }
+
+        // Check month
+        if (filter.deadlineMonth) {
+          const monthSearch = filter.deadlineMonth.toLowerCase().trim();
+          const monthName = format(date, 'MMM').toLowerCase();
+          const monthNumber = (date.getMonth() + 1).toString();
+          const monthNumberPadded = monthNumber.padStart(2, '0');
+          
+          const monthMappings = {
+            'jan': ['jan', 'january', '1', '01'],
+            'feb': ['feb', 'february', '2', '02'],
+            'mar': ['mar', 'march', '3', '03'],
+            'apr': ['apr', 'april', '4', '04'],
+            'may': ['may', '5', '05'],
+            'jun': ['jun', 'june', '6', '06'],
+            'jul': ['jul', 'july', '7', '07'],
+            'aug': ['aug', 'august', '8', '08'],
+            'sep': ['sep', 'september', '9', '09'],
+            'oct': ['oct', 'october', '10'],
+            'nov': ['nov', 'november', '11'],
+            'dec': ['dec', 'december', '12']
+          };
+
+          const currentMonthAliases = monthMappings[monthName] || [];
+          const matchesMonth = currentMonthAliases.some(alias => alias === monthSearch) ||
+                              monthSearch === monthName ||
+                              monthSearch === monthNumber ||
+                              monthSearch === monthNumberPadded;
+
+          if (!matchesMonth) {
+            return false;
+          }
+        }
+
+        // Check day
+        if (filter.deadlineDay) {
+          const day = date.getDate().toString();
+          const dayPadded = day.padStart(2, '0');
+          if (day !== filter.deadlineDay && dayPadded !== filter.deadlineDay) {
+            return false;
+          }
+        }
+        
+        return true;
+      }
+      
+      case 'responsibleParty': {
+        if (!filter.responsibleParty) return true;
+        const filterLower = filter.responsibleParty.toLowerCase();
+        const responsibleNames = getResponsiblePartyNames(task.ResponsibleParty).toLowerCase();
+        return responsibleNames.includes(filterLower);
+      }
+      
+      case 'department': {
+        if (!filter.department || filter.department.length === 0) return true;
+        
+        // Helper function to normalize department names to match DEPARTMENTS values
+        const normalizeDept = (dept) => {
+          if (!dept) return null;
+          const deptLower = dept.toLowerCase().trim();
+          
+          // Direct match against DEPARTMENTS values
+          const deptValues = Object.values(DEPARTMENTS).map(d => d.toLowerCase());
+          const matchedIndex = deptValues.findIndex(d => d === deptLower);
+          if (matchedIndex >= 0) {
+            return Object.values(DEPARTMENTS)[matchedIndex];
+          }
+          
+          // Fuzzy match
+          if (deptLower.includes('development')) return DEPARTMENTS.DEVELOPMENT;
+          if (deptLower.includes('compliance')) return DEPARTMENTS.COMPLIANCE;
+          if (deptLower.includes('accounting')) return DEPARTMENTS.ACCOUNTING;
+          if (deptLower.includes('management')) return DEPARTMENTS.MANAGEMENT;
+          if (deptLower.includes('human resources') || deptLower.includes('hr')) return DEPARTMENTS.HUMAN_RESOURCES;
+          if (deptLower.includes('construction')) return DEPARTMENTS.CONSTRUCTION;
+          
+          return null;
+        };
+        
+        // PRIMARY: Get department directly from task (comma-separated string)
+        const taskDepartmentValue = task.department || task.Department || '';
+        let taskDepartments = new Set();
+        
+        if (taskDepartmentValue && taskDepartmentValue.trim() !== '') {
+          // Parse comma-separated departments and normalize
+          const parsed = taskDepartmentValue.split(',').map(d => d.trim()).filter(Boolean);
+          parsed.forEach(dept => {
+            const normalized = normalizeDept(dept);
+            if (normalized) taskDepartments.add(normalized);
+          });
+        }
+        
+        // FALLBACK: If no direct department assignment, derive from responsible party
+        if (taskDepartments.size === 0 && users && users.length > 0) {
+          const responsibleParty = task.ResponsibleParty || task.responsibleParty || '';
+          
+          // Find all users assigned to this task
+          const assignedUsers = users.filter(user => {
+            const userEmail = user.email || user.Email || user.mail || user.userPrincipalName || '';
+            const userDisplayName = user.displayName || user.DisplayName || '';
+            return responsibleParty && responsibleParty.trim() !== '' && 
+                   (responsibleParty.includes(userEmail) || responsibleParty.includes(userDisplayName));
+          });
+          
+          // Collect all unique departments from all assigned users
+          assignedUsers.forEach(assignedUser => {
+            const userDepartments = assignedUser.departments || [];
+            userDepartments.forEach(department => {
+              if (department) {
+                const normalized = normalizeDept(department);
+                if (normalized) taskDepartments.add(normalized);
+              }
+            });
+          });
+        }
+        
+        // Normalize filter departments and check if task belongs to any
+        const normalizedFilterDepts = filter.department.map(dept => normalizeDept(dept)).filter(Boolean);
+        return normalizedFilterDepts.some(filterDept => taskDepartments.has(filterDept));
+      }
+      
+      case 'project': {
+        if (!filter.project) return true;
+        const filterLower = filter.project.toLowerCase();
+        const proj = (task.Project || '').toLowerCase();
+        return proj.includes(filterLower);
+      }
+      
+      case 'search': {
+        if (!filter.search) return true;
+        const filterLower = filter.search.toLowerCase();
+        const taskName = (task.Task || '').toLowerCase();
+        const project = (task.Project || '').toLowerCase();
+        const responsiblePartyNames = getResponsiblePartyNames(task.ResponsibleParty).toLowerCase();
+        const notes = (task.Notes || '').toLowerCase();
+        
+        return taskName.includes(filterLower) || 
+               project.includes(filterLower) || 
+               responsiblePartyNames.includes(filterLower) || 
+               notes.includes(filterLower);
+      }
+      
+      default:
+        return true;
+    }
+  };
+
+  // Helper function for separate deadline search fields (legacy - kept for backward compatibility)
   const matchesSeparateDeadlineSearch = (deadline) => {
     if (!deadline) return true;
     
@@ -333,19 +770,7 @@ function SortDeadlinesPage() {
   };
 
   // Get calculated status
-  const getCalculatedStatus = (task) => {
-    if (task.Completed_x003f_ === true || task.Completed_x003f_ === 'Yes' || task.Completed_x003f_ === 'yes' ||
-        task.Completed === true || task.Completed === 'Yes' || task.Completed === 'yes') {
-      return 'Completed';
-    }
-
-    const deadline = parseDeadlineDate(task.Deadline);
-    if (deadline && deadline < new Date()) {
-      return 'Overdue';
-    }
-
-    return 'Active';
-  };
+  const getCalculatedStatus = useCallback((task) => getTaskStatus(task), []);
 
   // Convert responsible party emails to display names
   const getResponsiblePartyNames = (responsibleParty) => {
@@ -382,56 +807,43 @@ function SortDeadlinesPage() {
     return names.join(', ');
   };
 
-  // Filter and sort tasks
-  const filteredAndSortedTasks = useMemo(() => {
-    let filtered = tasks.filter(task => {
-      // Status filter
-      const status = getCalculatedStatus(task);
-      if (activeFilter === 'active' && status !== 'Active') return false;
-      if (activeFilter === 'overdue' && status !== 'Overdue') return false;
-      if (activeFilter === 'complete' && status !== 'Completed') return false;
-      if (activeFilter === 'urgent' && task.Priority !== 'Urgent') return false;
-
-      // Secondary filter based on sort type
-      if (sortBy === 'deadline') {
-        // Always check deadline filters when deadline sorting is selected
-        if (!matchesSeparateDeadlineSearch(task.Deadline)) return false;
-      } else if (sortBy === 'department') {
-        // Department filter with multi-select - use same logic as Dashboard
-        if (selectedDepartments.length > 0) {
+  // Calculate base filtered tasks (department filter + cascading filters, WITHOUT activeFilter)
+  // This is used for counts and header total
+  const baseFilteredTasks = useMemo(() => {
+    // First apply department filter using shared function
+    let preFiltered = getVisibleTasks(tasks, {
+      isFilterActive,
+      userDepartments,
+      users
+    });
+    
+    // Apply cascading filters (same logic as filteredAndSortedTasks)
+    let filtered = preFiltered.filter(task => {
+      // Apply cascading filters - each filter applies to results of previous filters
+      for (let i = 0; i < sortBars.length; i++) {
+        const sortBar = sortBars[i];
+        const filter = filters[i] || {};
+        
+        if (!taskMatchesFilter(task, filter, sortBar.sortBy)) {
+          return false;
+        }
+      }
+      
+      // Legacy filter support
+      const primarySortBy = sortBars[0]?.sortBy || 'deadline';
+      if (primarySortBy === 'deadline' && (deadlineYear || deadlineMonth || deadlineDay)) {
+        if (!filters[0]?.deadlineYear && !filters[0]?.deadlineMonth && !filters[0]?.deadlineDay) {
+          if (!matchesSeparateDeadlineSearch(getTaskDeadline(task))) return false;
+        }
+      } else if (primarySortBy === 'department' && selectedDepartments.length > 0) {
+        if (!filters[0]?.department || filters[0].department.length === 0) {
           const responsibleParty = task.ResponsibleParty || task.responsibleParty || '';
-          
-          console.log('SortDeadlines: Filtering task by department:', {
-            taskId: task.id,
-            taskName: task.Task,
-            responsibleParty: responsibleParty,
-            selectedDepartments: selectedDepartments,
-            usersCount: users.length
-          });
-          
-          // Find all users assigned to this task (same as Dashboard logic)
           const assignedUsers = users.filter(user => {
             const userEmail = user.email || user.Email || user.mail || user.userPrincipalName || '';
             const userDisplayName = user.displayName || user.DisplayName || '';
-            
-            // Only match if responsible party is not empty and contains the user's email or display name
-            const matches = responsibleParty && responsibleParty.trim() !== '' && 
+            return responsibleParty && responsibleParty.trim() !== '' && 
                    (responsibleParty.includes(userEmail) || responsibleParty.includes(userDisplayName));
-            
-            if (matches) {
-              console.log('SortDeadlines: Found matching user for task:', {
-                taskId: task.id,
-                userId: user.id,
-                userEmail: userEmail,
-                userDisplayName: userDisplayName,
-                userDepartments: user.departments
-              });
-            }
-            
-            return matches;
           });
-          
-          // Collect all unique departments from all assigned users
           const taskDepartments = new Set();
           assignedUsers.forEach(assignedUser => {
             const userDepartments = assignedUser.departments || [];
@@ -439,92 +851,137 @@ function SortDeadlinesPage() {
               taskDepartments.add(department);
             });
           });
-          
-          console.log('SortDeadlines: Task department analysis:', {
-            taskId: task.id,
-            taskName: task.Task,
-            assignedUsersCount: assignedUsers.length,
-            taskDepartments: Array.from(taskDepartments),
-            selectedDepartments: selectedDepartments
-          });
-          
-          // Task must belong to at least one selected department
-          const matchesDepartment = selectedDepartments.some(dept => taskDepartments.has(dept));
-          
-          console.log('SortDeadlines: Department match result:', {
-            taskId: task.id,
-            matchesDepartment: matchesDepartment
-          });
-          
-          if (!matchesDepartment) return false;
+          if (!selectedDepartments.some(dept => taskDepartments.has(dept))) return false;
         }
       } else if (secondaryFilter) {
         const filterLower = secondaryFilter.toLowerCase();
-        switch (sortBy) {
+        switch (primarySortBy) {
           case 'search':
-            const taskName = (task.Task || '').toLowerCase();
-            const project = (task.Project || '').toLowerCase();
-            const responsiblePartyNames = getResponsiblePartyNames(task.ResponsibleParty).toLowerCase();
-            const notes = (task.Notes || '').toLowerCase();
-            
-            if (!taskName.includes(filterLower) && 
-                !project.includes(filterLower) && 
-                !responsiblePartyNames.includes(filterLower) && 
-                !notes.includes(filterLower)) {
-              return false;
-            }
+          case 'task':
+            const taskName = (task.Task || task.task || '').toLowerCase();
+            if (!taskName.includes(filterLower)) return false;
             break;
           case 'responsibleParty':
-            const responsibleNames = getResponsiblePartyNames(task.ResponsibleParty).toLowerCase();
-            if (!responsibleNames.includes(filterLower)) return false;
+            if (!filters[0]?.responsibleParty) {
+              const responsibleNames = getResponsiblePartyNames(task.ResponsibleParty).toLowerCase();
+              if (!responsibleNames.includes(filterLower)) return false;
+            }
             break;
           case 'project':
-            const proj = (task.Project || '').toLowerCase();
-            if (!proj.includes(filterLower)) return false;
+            if (!filters[0]?.project) {
+              const proj = (task.Project || '').toLowerCase();
+              if (!proj.includes(filterLower)) return false;
+            }
             break;
         }
       }
+      
+      return true;
+    });
+    
+    return filtered;
+  }, [tasks, sortBars, filters, secondaryFilter, deadlineYear, deadlineMonth, deadlineDay, selectedDepartments, users, isFilterActive, userDepartments, getResponsiblePartyNames]);
+
+  // Filter and sort tasks
+  const filteredAndSortedTasks = useMemo(() => {
+    // Use baseFilteredTasks (already has department + cascading filters applied)
+    // Now just apply activeFilter (status filter)
+    let filteredList = baseFilteredTasks.filter(task => {
+      const status = getCalculatedStatus(task);
+      const priority = (task.Priority || task.priority || '').toLowerCase();
+      const isUrgent = priority === 'urgent';
+      const isActiveStatus = status === 'Active' || status === 'Due Soon';
+
+      if (activeFilter === 'active' && !isActiveStatus) return false;
+      if (activeFilter === 'overdue' && status !== 'Overdue') return false;
+      if (activeFilter === 'complete' && status !== 'Completed') return false;
+      if (activeFilter === 'urgent' && !(isUrgent && isActiveStatus)) return false;
 
       return true;
     });
 
-    // Sort tasks
-    filtered.sort((a, b) => {
-      let aValue, bValue;
-      
+    // Helper function to get sort value for a task
+    const getSortValue = (task, sortBy) => {
       switch (sortBy) {
         case 'deadline':
-          aValue = parseDeadlineDate(a.Deadline) || new Date(0);
-          bValue = parseDeadlineDate(b.Deadline) || new Date(0);
-          break;
+          return parseDeadlineDate(getTaskDeadline(task)) || new Date(0);
         case 'project':
-          aValue = (a.Project || '').toLowerCase();
-          bValue = (b.Project || '').toLowerCase();
-          break;
+          return (task.Project || '').toLowerCase();
         case 'responsibleParty':
         case 'department':
         case 'search':
         case 'task':
         default:
           // For all non-project sorts, default to chronological (deadline) sorting
-          aValue = parseDeadlineDate(a.Deadline) || new Date(0);
-          bValue = parseDeadlineDate(b.Deadline) || new Date(0);
-          break;
+          return parseDeadlineDate(getTaskDeadline(task)) || new Date(0);
       }
+    };
 
-      if (sortBy === 'deadline' || (sortBy !== 'project')) {
-        // Use chronological sorting for deadline and all non-project sorts
-        return sortOrder === 'asc' ? aValue - bValue : bValue - aValue;
-      } else {
-        // Use alphabetical sorting only for project
-        if (aValue < bValue) return sortOrder === 'asc' ? -1 : 1;
-        if (aValue > bValue) return sortOrder === 'asc' ? 1 : -1;
-        return 0;
+    // Multi-level sorting: apply each sort bar in order
+    filteredList.sort((a, b) => {
+      for (let i = 0; i < sortBars.length; i++) {
+        const sortBar = sortBars[i];
+        const aValue = getSortValue(a, sortBar.sortBy);
+        const bValue = getSortValue(b, sortBar.sortBy);
+        
+        let comparison = 0;
+        
+        if (sortBar.sortBy === 'project') {
+          // Alphabetical sorting for project
+          if (aValue < bValue) comparison = -1;
+          else if (aValue > bValue) comparison = 1;
+          
+          // If projects are equal, add secondary chronological sort by deadline
+          if (comparison === 0) {
+            const aDeadline = parseDeadlineDate(getTaskDeadline(a)) || new Date(0);
+            const bDeadline = parseDeadlineDate(getTaskDeadline(b)) || new Date(0);
+            comparison = aDeadline - bDeadline;
+          }
+        } else {
+          // Chronological/numerical sorting for deadline and others
+          if (aValue < bValue) comparison = -1;
+          else if (aValue > bValue) comparison = 1;
+        }
+        
+        // Apply sort order
+        if (comparison !== 0) {
+          return sortBar.sortOrder === 'asc' ? comparison : -comparison;
+        }
+        // If equal, continue to next sort level
       }
+      return 0; // All levels equal
     });
 
-    return filtered;
-  }, [tasks, activeFilter, sortBy, sortOrder, secondaryFilter, deadlineYear, deadlineMonth, deadlineDay, selectedDepartments, users]);
+    return filteredList;
+  }, [baseFilteredTasks, activeFilter, getCalculatedStatus]);
+
+  // Single source of truth for badge counts: always derived from baseFilteredTasks
+  // (department filter + cascading filters). Ensures counts match visible tasks.
+  const badgeCounts = useMemo(() => {
+    const activeCount = baseFilteredTasks.filter(task => {
+      const status = getCalculatedStatus(task);
+      return status === 'Active' || status === 'Due Soon';
+    }).length;
+    const overdueCount = baseFilteredTasks.filter(task =>
+      getCalculatedStatus(task) === 'Overdue'
+    ).length;
+    const completeCount = baseFilteredTasks.filter(task =>
+      getCalculatedStatus(task) === 'Completed'
+    ).length;
+    const isUrgentTask = (task) => {
+      const status = getCalculatedStatus(task);
+      const priority = (task.Priority || task.priority || '').toLowerCase();
+      return (status === 'Active' || status === 'Due Soon') && priority === 'urgent';
+    };
+    const urgentCount = baseFilteredTasks.filter(isUrgentTask).length;
+    return {
+      activeCount,
+      overdueCount,
+      completeCount,
+      urgentCount,
+      totalCount: baseFilteredTasks.length
+    };
+  }, [baseFilteredTasks, getCalculatedStatus]);
 
   if (loading) {
     return (
@@ -537,37 +994,11 @@ function SortDeadlinesPage() {
     );
   }
 
-  const getStatusIcon = (status) => {
-    switch (status) {
-      case 'Completed':
-        return <CheckCircleIcon className="w-5 h-5 text-green-500" />;
-      case 'Overdue':
-        return <ExclamationTriangleIcon className="w-5 h-5 text-red-500" />;
-      case 'Active':
-        return <ClockIcon className="w-5 h-5 text-blue-500" />;
-      default:
-        return <ClockIcon className="w-5 h-5 text-gray-500" />;
-    }
-  };
-
-  const getStatusColor = (status) => {
-    switch (status) {
-      case 'Completed':
-        return 'bg-green-100 text-green-800 dark:bg-green-900/20 dark:text-green-400';
-      case 'Overdue':
-        return 'bg-red-100 text-red-800 dark:bg-red-900/20 dark:text-red-400';
-      case 'Active':
-        return 'bg-blue-100 text-blue-800 dark:bg-blue-900/20 dark:text-blue-400';
-      default:
-        return 'bg-gray-100 text-gray-800 dark:bg-gray-900/20 dark:text-gray-400';
-    }
-  };
-
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50/30 to-indigo-50/20 dark:from-gray-900 dark:via-blue-950/30 dark:to-indigo-950/20 relative">
+    <div className="min-h-screen bg-gray-50 dark:bg-gray-900 relative">
       {/* Updating Overlay */}
       {updating && (
-        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50">
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-[100]">
           <div className="bg-white dark:bg-gray-800 rounded-xl shadow-2xl p-8 flex flex-col items-center gap-4 border border-gray-200 dark:border-gray-700">
             <div className="animate-spin rounded-full h-16 w-16 border-4 border-blue-200 border-t-blue-600"></div>
             <div className="text-center">
@@ -588,7 +1019,7 @@ function SortDeadlinesPage() {
           </div>
           <div className="text-right">
             <div className="text-xl font-bold text-gray-900 dark:text-white">
-              {filteredAndSortedTasks.length} of {tasks.length}
+              {filteredAndSortedTasks.length} of {baseFilteredTasks.length}
             </div>
             <div className="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wide">
               Tasks
@@ -608,11 +1039,11 @@ function SortDeadlinesPage() {
             </div>
             <div className="flex flex-wrap gap-2">
               {[
-                { key: 'active', label: 'Active', count: tasks.filter(t => getCalculatedStatus(t) === 'Active').length, color: 'blue' },
-                { key: 'overdue', label: 'Overdue', count: tasks.filter(t => getCalculatedStatus(t) === 'Overdue').length, color: 'red' },
-                { key: 'complete', label: 'Complete', count: tasks.filter(t => getCalculatedStatus(t) === 'Completed').length, color: 'green' },
-                { key: 'urgent', label: 'Urgent', count: tasks.filter(t => t.Priority === 'Urgent').length, color: 'orange' },
-                { key: 'all', label: 'All', count: tasks.length, color: 'gray' }
+                { key: 'active', label: 'Active', count: badgeCounts.activeCount, color: 'blue' },
+                { key: 'overdue', label: 'Overdue', count: badgeCounts.overdueCount, color: 'red' },
+                { key: 'complete', label: 'Complete', count: badgeCounts.completeCount, color: 'green' },
+                { key: 'urgent', label: 'Urgent', count: badgeCounts.urgentCount, color: 'orange' },
+                { key: 'all', label: 'All', count: badgeCounts.totalCount, color: 'gray' }
               ].map(filter => (
                 <button
                   key={filter.key}
@@ -642,7 +1073,7 @@ function SortDeadlinesPage() {
             </div>
           </div>
 
-          {/* Sort & Filter Island */}
+          {/* Sort & Filter Island - Multiple Sort Bars */}
           <div className="bg-white/80 dark:bg-gray-800/80 backdrop-blur-xl rounded-xl shadow-lg border border-white/20 dark:border-gray-700/50 p-4">
             <div className="flex items-center gap-2 mb-3">
               <MagnifyingGlassIcon className="w-4 h-4 text-gray-600 dark:text-gray-400" />
@@ -650,141 +1081,203 @@ function SortDeadlinesPage() {
                 Sort & Filter
               </h3>
             </div>
-            <div className="flex gap-2 items-center">
-              <select
-                value={sortBy}
-                onChange={(e) => {
-                  setSortBy(e.target.value);
-                  setSecondaryFilter(''); // Clear secondary filter when sort type changes
-                }}
-                className="flex-1 px-3 py-2 rounded-lg border-0 bg-white/60 dark:bg-gray-700/60 backdrop-blur-sm text-gray-900 dark:text-gray-100 text-sm font-medium shadow-sm focus:ring-2 focus:ring-blue-500 focus:bg-white dark:focus:bg-gray-700 transition-all duration-200"
-              >
-                <option value="deadline">Deadline</option>
-                <option value="project">Project</option>
-                <option value="responsibleParty">Responsible Party</option>
-                <option value="department">Department</option>
-                <option value="search">Search</option>
-              </select>
-              <select
-                value={sortOrder}
-                onChange={(e) => setSortOrder(e.target.value)}
-                className="px-3 py-2 rounded-lg border-0 bg-white/60 dark:bg-gray-700/60 backdrop-blur-sm text-gray-900 dark:text-gray-100 text-sm font-medium shadow-sm focus:ring-2 focus:ring-blue-500 focus:bg-white dark:focus:bg-gray-700 transition-all duration-200"
-              >
-                <option value="asc">↑</option>
-                <option value="desc">↓</option>
-              </select>
+            <div className="space-y-2">
+              {sortBars.map((sortBar, index) => (
+                <div key={sortBar.id || index} className="flex gap-2 items-center">
+                  <select
+                    value={sortBar.sortBy}
+                    onChange={(e) => updateSortBar(index, 'sortBy', e.target.value)}
+                    className="flex-1 px-3 py-2 rounded-lg border-0 bg-white/60 dark:bg-gray-700/60 backdrop-blur-sm text-gray-900 dark:text-gray-100 text-sm font-medium shadow-sm focus:ring-2 focus:ring-blue-500 focus:bg-white dark:focus:bg-gray-700 transition-all duration-200"
+                  >
+                    <option value="deadline">Deadline</option>
+                    <option value="project">Project</option>
+                    <option value="responsibleParty">Responsible Party</option>
+                    <option value="department">Department</option>
+                    <option value="search">Search</option>
+                  </select>
+                  <select
+                    value={sortBar.sortOrder}
+                    onChange={(e) => updateSortBar(index, 'sortOrder', e.target.value)}
+                    className="px-3 py-2 rounded-lg border-0 bg-white/60 dark:bg-gray-700/60 backdrop-blur-sm text-gray-900 dark:text-gray-100 text-sm font-medium shadow-sm focus:ring-2 focus:ring-blue-500 focus:bg-white dark:focus:bg-gray-700 transition-all duration-200"
+                  >
+                    <option value="asc">↑</option>
+                    <option value="desc">↓</option>
+                  </select>
+                  {index > 0 && (
+                    <button
+                      onClick={() => removeSortBar(index)}
+                      className="px-2 py-2 rounded-lg bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400 hover:bg-red-200 dark:hover:bg-red-900/50 transition-all duration-200"
+                      title="Remove sort"
+                    >
+                      <MinusIcon className="w-4 h-4" />
+                    </button>
+                  )}
+                  {index === sortBars.length - 1 && sortBars.length < 4 && (
+                    <button
+                      onClick={addSortBar}
+                      className="px-2 py-2 rounded-lg bg-blue-100 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400 hover:bg-blue-200 dark:hover:bg-blue-900/50 transition-all duration-200"
+                      title="Add another sort"
+                    >
+                      <PlusIcon className="w-4 h-4" />
+                    </button>
+                  )}
+                </div>
+              ))}
             </div>
           </div>
         </div>
 
-        {/* Secondary Filter */}
-        {(sortBy === 'deadline' || sortBy === 'responsibleParty' || sortBy === 'project' || sortBy === 'department' || sortBy === 'search') && (
-          <div className="bg-white/80 dark:bg-gray-800/80 backdrop-blur-xl rounded-xl shadow-lg border border-white/20 dark:border-gray-700/50 p-4 animate-in slide-in-from-top-2 duration-300">
-            <div className="flex items-center gap-4">
-              <div className="flex items-center gap-2">
-                <MagnifyingGlassIcon className="w-4 h-4 text-gray-600 dark:text-gray-400" />
-                <div className="text-sm font-semibold text-gray-800 dark:text-gray-200">
-                  {sortBy === 'search' ? 'Search:' : `Filter by ${sortBy === 'deadline' ? 'Deadline' : sortBy === 'responsibleParty' ? 'Responsible Party' : sortBy === 'department' ? 'Department' : 'Project'}:`}
+        {/* Cascading Filters - One filter bar per sort bar */}
+        <div className="space-y-3">
+          {sortBars.map((sortBar, index) => {
+            const filter = filters[index] || {};
+            const sortBy = sortBar.sortBy;
+            const hasFilterValue = sortBy === 'deadline' 
+              ? (filter.deadlineYear || filter.deadlineMonth || filter.deadlineDay)
+              : sortBy === 'department'
+              ? (filter.department && filter.department.length > 0)
+              : sortBy === 'search'
+              ? filter.search
+              : sortBy === 'responsibleParty'
+              ? filter.responsibleParty
+              : sortBy === 'project'
+              ? filter.project
+              : false;
+
+            if (sortBy !== 'deadline' && sortBy !== 'responsibleParty' && sortBy !== 'project' && sortBy !== 'department' && sortBy !== 'search') {
+              return null;
+            }
+
+            return (
+              <div key={`filter-${sortBar.id || index}`} className="bg-white/80 dark:bg-gray-800/80 backdrop-blur-xl rounded-xl shadow-lg border border-white/20 dark:border-gray-700/50 p-4 animate-in slide-in-from-top-2 duration-300">
+                <div className="flex flex-col gap-3">
+                  <div className="flex items-center gap-4 flex-wrap">
+                    <div className="flex items-center gap-2 flex-shrink-0">
+                      <MagnifyingGlassIcon className="w-4 h-4 text-gray-600 dark:text-gray-400" />
+                      <div className="text-sm font-semibold text-gray-800 dark:text-gray-200 whitespace-nowrap">
+                        {sortBy === 'search' ? 'Search:' : `Filter by ${sortBy === 'deadline' ? 'Deadline' : sortBy === 'responsibleParty' ? 'Responsible Party' : sortBy === 'department' ? 'Department' : 'Project'}:`}
+                      </div>
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      {sortBy === 'deadline' ? (
+                        <div className="flex gap-2 flex-wrap items-center">
+                          <input
+                            type="text"
+                            placeholder="Year (e.g., 2025)"
+                            value={filter.deadlineYear || ''}
+                            onChange={(e) => updateFilter(index, 'deadlineYear', e.target.value)}
+                            className="flex-1 min-w-[100px] px-3 py-2 rounded-lg border-0 bg-white/60 dark:bg-gray-700/60 backdrop-blur-sm text-gray-900 dark:text-gray-100 text-sm font-medium shadow-sm focus:ring-2 focus:ring-blue-500/20 focus:bg-white dark:focus:bg-gray-700 transition-all duration-200 placeholder-gray-500 dark:placeholder-gray-400"
+                          />
+                          <input
+                            type="text"
+                            placeholder="Month (e.g., Oct, 10, October)"
+                            value={filter.deadlineMonth || ''}
+                            onChange={(e) => updateFilter(index, 'deadlineMonth', e.target.value)}
+                            className="flex-1 min-w-[120px] px-3 py-2 rounded-lg border-0 bg-white/60 dark:bg-gray-700/60 backdrop-blur-sm text-gray-900 dark:text-gray-100 text-sm font-medium shadow-sm focus:ring-2 focus:ring-blue-500/20 focus:bg-white dark:focus:bg-gray-700 transition-all duration-200 placeholder-gray-500 dark:placeholder-gray-400"
+                          />
+                          <input
+                            type="text"
+                            placeholder="Day (e.g., 3, 03)"
+                            value={filter.deadlineDay || ''}
+                            onChange={(e) => updateFilter(index, 'deadlineDay', e.target.value)}
+                            className="flex-1 min-w-[80px] px-3 py-2 rounded-lg border-0 bg-white/60 dark:bg-gray-700/60 backdrop-blur-sm text-gray-900 dark:text-gray-100 text-sm font-medium shadow-sm focus:ring-2 focus:ring-blue-500/20 focus:bg-white dark:focus:bg-gray-700 transition-all duration-200 placeholder-gray-500 dark:placeholder-gray-400"
+                          />
+                          {/* Clear button inline for deadline */}
+                          {hasFilterValue && (
+                            <button
+                              onClick={() => {
+                                const newFilters = [...filters];
+                                newFilters[index] = {
+                                  ...newFilters[index],
+                                  deadlineYear: '',
+                                  deadlineMonth: '',
+                                  deadlineDay: ''
+                                };
+                                setFilters(newFilters);
+                              }}
+                              className="px-3 py-2 bg-gray-100 hover:bg-gray-200 dark:bg-gray-700 dark:hover:bg-gray-600 text-gray-700 dark:text-gray-300 rounded-lg text-sm font-medium transition-all duration-200 hover:scale-105 flex-shrink-0"
+                            >
+                              Clear
+                            </button>
+                          )}
+                        </div>
+                      ) : sortBy === 'department' ? (
+                        <div className="flex gap-2 flex-wrap items-center">
+                          {/* Only show accessible departments when filter is active */}
+                          {(isFilterActive 
+                            ? getAccessibleDepartments(Object.values(DEPARTMENTS))
+                            : Object.values(DEPARTMENTS)
+                          ).map(dept => {
+                            const isSelected = (filter.department || []).includes(dept);
+                            // Get department-specific color
+                            const deptColorClass = getDepartmentColor(dept);
+                            // Create hover variant
+                            const hoverColorClass = deptColorClass.replace('bg-', 'hover:bg-').replace('-500', '-600');
+                            
+                            return (
+                              <button
+                                key={dept}
+                                onClick={() => updateFilter(index, 'department', dept)}
+                                className={`px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200 flex-shrink-0 ${
+                                  isSelected
+                                    ? `${deptColorClass} text-white shadow-md ${hoverColorClass}`
+                                    : 'bg-white/60 dark:bg-gray-700/60 text-gray-700 dark:text-gray-300 hover:bg-white dark:hover:bg-gray-700 shadow-sm'
+                                }`}
+                              >
+                                {getDepartmentDisplayName(dept)}
+                              </button>
+                            );
+                          })}
+                          {/* Clear button inline for department */}
+                          {hasFilterValue && (
+                            <button
+                              onClick={() => updateFilter(index, 'department', [])}
+                              className="px-3 py-2 bg-gray-100 hover:bg-gray-200 dark:bg-gray-700 dark:hover:bg-gray-600 text-gray-700 dark:text-gray-300 rounded-lg text-sm font-medium transition-all duration-200 hover:scale-105 flex-shrink-0"
+                            >
+                              Clear
+                            </button>
+                          )}
+                        </div>
+                      ) : (
+                        <div className="flex gap-2 items-center">
+                          <input
+                            type="text"
+                            placeholder={
+                              sortBy === 'search'
+                                ? 'Search tasks, projects, responsible parties, or notes...'
+                                : sortBy === 'responsibleParty' 
+                                  ? 'e.g., "John", "Smith", "john@company.com"'
+                                  : 'e.g., "Project Alpha", "Development"'
+                            }
+                            value={filter[sortBy] || ''}
+                            onChange={(e) => updateFilter(index, sortBy, e.target.value)}
+                            className="flex-1 px-4 py-2 rounded-lg border-0 bg-white/60 dark:bg-gray-700/60 backdrop-blur-sm text-gray-900 dark:text-gray-100 text-sm font-medium shadow-sm focus:ring-2 focus:ring-blue-500/20 focus:bg-white dark:focus:bg-gray-700 transition-all duration-200 placeholder-gray-500 dark:placeholder-gray-400"
+                          />
+                          {/* Clear button inline for other filters */}
+                          {hasFilterValue && (
+                            <button
+                              onClick={() => updateFilter(index, sortBy, '')}
+                              className="px-3 py-2 bg-gray-100 hover:bg-gray-200 dark:bg-gray-700 dark:hover:bg-gray-600 text-gray-700 dark:text-gray-300 rounded-lg text-sm font-medium transition-all duration-200 hover:scale-105 flex-shrink-0"
+                            >
+                              Clear
+                            </button>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  </div>
                 </div>
               </div>
-              <div className="flex-1 max-w-md">
-                {sortBy === 'deadline' ? (
-                  <div className="flex gap-2">
-                    <input
-                      type="text"
-                      placeholder="Year (e.g., 2025)"
-                      value={deadlineYear}
-                      onChange={(e) => setDeadlineYear(e.target.value)}
-                      className="flex-1 px-3 py-2 rounded-lg border-0 bg-white/60 dark:bg-gray-700/60 backdrop-blur-sm text-gray-900 dark:text-gray-100 text-sm font-medium shadow-sm focus:ring-2 focus:ring-blue-500/20 focus:bg-white dark:focus:bg-gray-700 transition-all duration-200 placeholder-gray-500 dark:placeholder-gray-400"
-                    />
-                    <input
-                      type="text"
-                      placeholder="Month (e.g., Oct, 10, October)"
-                      value={deadlineMonth}
-                      onChange={(e) => setDeadlineMonth(e.target.value)}
-                      className="flex-1 px-3 py-2 rounded-lg border-0 bg-white/60 dark:bg-gray-700/60 backdrop-blur-sm text-gray-900 dark:text-gray-100 text-sm font-medium shadow-sm focus:ring-2 focus:ring-blue-500/20 focus:bg-white dark:focus:bg-gray-700 transition-all duration-200 placeholder-gray-500 dark:placeholder-gray-400"
-                    />
-                    <input
-                      type="text"
-                      placeholder="Day (e.g., 3, 03)"
-                      value={deadlineDay}
-                      onChange={(e) => setDeadlineDay(e.target.value)}
-                      className="flex-1 px-3 py-2 rounded-lg border-0 bg-white/60 dark:bg-gray-700/60 backdrop-blur-sm text-gray-900 dark:text-gray-100 text-sm font-medium shadow-sm focus:ring-2 focus:ring-blue-500/20 focus:bg-white dark:focus:bg-gray-700 transition-all duration-200 placeholder-gray-500 dark:placeholder-gray-400"
-                    />
-                  </div>
-                ) : sortBy === 'department' ? (
-                  <div className="flex gap-2 flex-wrap">
-                    {[
-                      { value: 'development', label: 'Development' },
-                      { value: 'accounting', label: 'Accounting' },
-                      { value: 'compliance', label: 'Compliance' },
-                      { value: 'management', label: 'Management' }
-                    ].map(dept => (
-                      <button
-                        key={dept.value}
-                        onClick={() => {
-                          setSelectedDepartments(prev => 
-                            prev.includes(dept.value) 
-                              ? prev.filter(d => d !== dept.value)
-                              : [...prev, dept.value]
-                          );
-                        }}
-                        className={`px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200 ${
-                          selectedDepartments.includes(dept.value)
-                            ? 'bg-blue-600 text-white shadow-md hover:bg-blue-700'
-                            : 'bg-white/60 dark:bg-gray-700/60 text-gray-700 dark:text-gray-300 hover:bg-white dark:hover:bg-gray-700 shadow-sm'
-                        }`}
-                      >
-                        {dept.label}
-                      </button>
-                    ))}
-                  </div>
-                ) : (
-                  <div className="relative">
-                    <input
-                      type="text"
-                      placeholder={
-                        sortBy === 'search'
-                          ? 'Search tasks, projects, responsible parties, or notes...'
-                          : sortBy === 'responsibleParty' 
-                            ? 'e.g., "John", "Smith", "john@company.com"'
-                            : 'e.g., "Project Alpha", "Development"'
-                      }
-                      value={secondaryFilter}
-                      onChange={(e) => setSecondaryFilter(e.target.value)}
-                      className="w-full px-4 py-2 rounded-lg border-0 bg-white/60 dark:bg-gray-700/60 backdrop-blur-sm text-gray-900 dark:text-gray-100 text-sm font-medium shadow-sm focus:ring-2 focus:ring-blue-500/20 focus:bg-white dark:focus:bg-gray-700 transition-all duration-200 placeholder-gray-500 dark:placeholder-gray-400"
-                    />
-                  </div>
-                )}
-              </div>
-              {(sortBy === 'deadline' ? (deadlineYear || deadlineMonth || deadlineDay) : sortBy === 'department' ? selectedDepartments.length > 0 : secondaryFilter) && (
-                <button
-                  onClick={() => {
-                    if (sortBy === 'deadline') {
-                      setDeadlineYear('');
-                      setDeadlineMonth('');
-                      setDeadlineDay('');
-                    } else if (sortBy === 'department') {
-                      setSelectedDepartments([]);
-                    } else {
-                      setSecondaryFilter('');
-                    }
-                  }}
-                  className="px-3 py-2 bg-gray-100 hover:bg-gray-200 dark:bg-gray-700 dark:hover:bg-gray-600 text-gray-700 dark:text-gray-300 rounded-lg text-sm font-medium transition-all duration-200 hover:scale-105"
-                >
-                  Clear
-                </button>
-              )}
-            </div>
-          </div>
-        )}
+            );
+          })}
+        </div>
 
         {/* Results */}
         <div className="space-y-4">
           {filteredAndSortedTasks.length > 0 ? (
             filteredAndSortedTasks.map((task, index) => {
                 // Add daysUntil calculation for TaskCard
-                const deadline = parseDeadlineDate(task.Deadline);
+                const deadline = parseDeadlineDate(getTaskDeadline(task));
                 const today = new Date();
                 // Normalize both dates to start of day for accurate calculation
                 const deadlineStartOfDay = deadline ? new Date(deadline.getFullYear(), deadline.getMonth(), deadline.getDate()) : null;
@@ -798,15 +1291,13 @@ function SortDeadlinesPage() {
                     ...task,
                     daysUntil: daysUntil
                   }}
-                  showCompletion={true}
-                  showUrgency={true}
-                  showDelete={true}
-                  onToggleCompletion={toggleTaskCompletion}
-                  onToggleUrgency={toggleTaskUrgency}
-                  onDelete={deleteTask}
                   className="backdrop-blur-sm hover:scale-[1.02] hover:shadow-lg"
                   style={{ animationDelay: `${index * 30}ms` }}
                   users={users}
+                  onToggleComplete={handleToggleComplete}
+                  onToggleUrgent={handleToggleUrgent}
+                  onNoteClick={handleNoteClick}
+                  onDeleteClick={handleDeleteClick}
                 />
                 );
               })
@@ -821,6 +1312,20 @@ function SortDeadlinesPage() {
           )}
         </div>
       </div>
+
+      {/* Modals */}
+      <NoteModal
+        isOpen={noteModal.isOpen}
+        onClose={() => setNoteModal({ isOpen: false, task: null })}
+        task={noteModal.task}
+        onSave={handleNoteSave}
+      />
+      <DeleteConfirmModal
+        isOpen={deleteModal.isOpen}
+        onClose={() => setDeleteModal({ isOpen: false, taskId: null, taskName: null })}
+        onConfirm={handleDeleteConfirm}
+        itemName={deleteModal.taskName}
+      />
     </div>
   );
 }
