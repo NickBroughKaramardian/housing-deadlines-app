@@ -1,6 +1,6 @@
 {
   "name": "c-and-c-project-manager",
-  "version": "FINAL BEFORE AZURE MIGRATION..1",
+  "version": "FINAL BEFORE AZURE MIGRATION..2",
   "private": true,
   "dependencies": {
     "@azure/msal-browser": "^2.34.0",
