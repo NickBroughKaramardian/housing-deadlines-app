@@ -22,3 +22,14 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 VERSION_1.4.10_BACKUP
+
+# secrets / credentials — never commit
+serviceAccountKey.json
+**/serviceAccountKey.json
+*-firebase-adminsdk-*.json
+azure-functions/local.settings.json
+**/local.settings.json
+.env
+.env.*
+!.env.example
+
