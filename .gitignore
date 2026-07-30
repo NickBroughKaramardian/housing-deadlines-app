@@ -21,7 +21,6 @@
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
-VERSION_1.4.10_BACKUP
 
 # secrets / credentials — never commit
 serviceAccountKey.json
@@ -32,4 +31,15 @@ azure-functions/local.settings.json
 .env
 .env.*
 !.env.example
+
+# local backups / checkpoints / caches — never commit
+VERSION_*_BACKUP/
+backups/
+checkpoints/
+.firebase/
+node_modules/
+functionapp*.zip
+*.backup
+*.backup2
+firebase-debug.log
 
