@@ -7,25 +7,25 @@ app.http('getWebSocketToken', {
   methods: ['GET'],
   authLevel: 'anonymous',
   route: 'websocket/token',
-  handler: requireAuth(async (request, context) => {
+  handler: requireAuth(async (context, req) => {
     try {
-      const userId = request.user.userId;
+      const userId = req.user.userId;
       const token = await webpubsub.getClientAccessToken(userId);
 
       if (!token) {
-        return {
+        context.res = {
           status: 500,
-          headers: { 'Content-Type': 'application/json' },
-          jsonBody: { error: 'Failed to generate WebSocket token' }
+          body: { error: 'Failed to generate WebSocket token' }
         };
+        return;
       }
 
-      return {
+      context.res = {
         status: 200,
         headers: {
           'Content-Type': 'application/json'
         },
-        jsonBody: {
+        body: {
           success: true,
           data: {
             url: token.url,
@@ -36,10 +36,9 @@ app.http('getWebSocketToken', {
 
     } catch (error) {
       console.error('Error getting WebSocket token:', error);
-      return {
+      context.res = {
         status: 500,
-        headers: { 'Content-Type': 'application/json' },
-        jsonBody: { error: 'Failed to get WebSocket token', message: error.message }
+        body: { error: 'Failed to get WebSocket token', message: error.message }
       };
     }
   })
@@ -50,25 +49,25 @@ app.http('negotiateWebSocket', {
   methods: ['POST'],
   authLevel: 'anonymous',
   route: 'websocket/negotiate',
-  handler: requireAuth(async (request, context) => {
+  handler: requireAuth(async (context, req) => {
     try {
-      const userId = request.user.userId;
+      const userId = req.user.userId;
       const token = await webpubsub.getClientAccessToken(userId);
 
       if (!token) {
-        return {
+        context.res = {
           status: 500,
-          headers: { 'Content-Type': 'application/json' },
-          jsonBody: { error: 'Failed to negotiate WebSocket connection' }
+          body: { error: 'Failed to negotiate WebSocket connection' }
         };
+        return;
       }
 
-      return {
+      context.res = {
         status: 200,
         headers: {
           'Content-Type': 'application/json'
         },
-        jsonBody: {
+        body: {
           url: token.url,
           accessToken: token.token
         }
@@ -76,10 +75,9 @@ app.http('negotiateWebSocket', {
 
     } catch (error) {
       console.error('Error negotiating WebSocket:', error);
-      return {
+      context.res = {
         status: 500,
-        headers: { 'Content-Type': 'application/json' },
-        jsonBody: { error: 'Failed to negotiate WebSocket', message: error.message }
+        body: { error: 'Failed to negotiate WebSocket', message: error.message }
       };
     }
   })

@@ -9,7 +9,7 @@
   },
   "dependencies": {
     "@azure/functions": "^4.0.0",
-    "mssql": "^10.0.0",
+    "@azure/cosmos": "^4.0.0",
     "@azure/identity": "^4.0.0",
     "@azure/web-pubsub": "^1.0.0",
     "uuid": "^9.0.0"

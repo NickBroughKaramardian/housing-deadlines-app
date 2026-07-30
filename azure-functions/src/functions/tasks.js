@@ -1,19 +1,12 @@
 const { app } = require('@azure/functions');
-// LAZY LOAD: Don't require database at module load time
-// This allows functions to register even if database dependencies are corrupted
-let db = null;
-function getDb() {
-  if (!db) {
-    db = require('../database');
-  }
-  return db;
-}
+const db = require('../database');
 
 function corsHeaders() {
-  // CORS is handled automatically by Azure portal configuration
-  // Only include non-CORS headers here to avoid conflicts
   return {
     'Content-Type': 'application/json',
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
   };
 }
 
@@ -24,7 +17,7 @@ app.http('getTasks', {
   route: 'tasks',
   handler: async () => {
     try {
-      const tasks = await getDb().queryTasks();
+      const tasks = await db.queryTasks();
       return { status: 200, headers: corsHeaders(), jsonBody: { success: true, data: tasks, count: tasks.length } };
     } catch (err) {
       return { status: 500, headers: corsHeaders(), jsonBody: { error: 'Failed to get tasks', message: String(err?.message || err) } };
@@ -43,7 +36,7 @@ app.http('createTask', {
       if (!body?.title || !body?.deadline_date) {
         return { status: 400, headers: corsHeaders(), jsonBody: { error: 'title and deadline_date are required' } };
       }
-      const task = await getDb().createTask(body);
+      const task = await db.createTask(body);
       return { status: 201, headers: corsHeaders(), jsonBody: { success: true, data: task } };
     } catch (err) {
       return { status: 500, headers: corsHeaders(), jsonBody: { error: 'Failed to create task', message: String(err?.message || err) } };
@@ -62,7 +55,7 @@ app.http('updateTask', {
       const id = url.searchParams.get('id');
       if (!id) return { status: 400, headers: corsHeaders(), jsonBody: { error: 'id is required' } };
       const updates = await request.json();
-      const updated = await getDb().updateTask(id, updates);
+      const updated = await db.updateTask(id, updates);
       return { status: 200, headers: corsHeaders(), jsonBody: { success: true, data: updated } };
     } catch (err) {
       return { status: 500, headers: corsHeaders(), jsonBody: { error: 'Failed to update task', message: String(err?.message || err) } };
@@ -80,8 +73,14 @@ app.http('deleteTask', {
       const url = new URL(request.url);
       const id = url.searchParams.get('id');
       if (!id) return { status: 400, headers: corsHeaders(), jsonBody: { error: 'id is required' } };
-      await getDb().deleteTask(id);
-      return { status: 204, headers: corsHeaders(), body: '' };
+      await db.deleteTask(id);
+      // 204 No Content should have no body and no Content-Type header
+      const headers = {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+      };
+      return { status: 204, headers };
     } catch (err) {
       return { status: 500, headers: corsHeaders(), jsonBody: { error: 'Failed to delete task', message: String(err?.message || err) } };
     }
@@ -89,11 +88,9 @@ app.http('deleteTask', {
 });
 
 // OPTIONS /api/tasks (CORS preflight)
-// Note: Azure portal CORS configuration handles OPTIONS requests automatically
-// This handler is kept for compatibility but CORS headers are handled by Azure
 app.http('optionsTasks', {
   methods: ['OPTIONS'],
   authLevel: 'anonymous',
   route: 'tasks',
-  handler: async () => ({ status: 200, headers: corsHeaders(), body: '' }),
+  handler: async () => ({ status: 200, headers: { ...corsHeaders(), 'Access-Control-Max-Age': '86400' }, body: '' }),
 });

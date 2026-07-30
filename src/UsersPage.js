@@ -90,44 +90,62 @@ function UsersPage() {
 
   // Handle department toggle
   const handleDepartmentToggle = (userId, department) => {
-    const user = users.find(u => u.id === userId);
-    const currentDepartments = user.departments || [];
-    const newDepartments = currentDepartments.includes(department)
-      ? currentDepartments.filter(d => d !== department)
-      : [...currentDepartments, department];
+    // Use functional update to ensure we're working with latest state
+    setUsers(prevUsers => {
+      const user = prevUsers.find(u => u.id === userId);
+      if (!user) return prevUsers;
+      
+      const currentDepartments = user.departments || [];
+      const newDepartments = currentDepartments.includes(department)
+        ? currentDepartments.filter(d => d !== department)
+        : [...currentDepartments, department];
 
-    // Update local state
-    setUsers(users.map(u => 
-      u.id === userId ? { ...u, departments: newDepartments } : u
-    ));
+      // Save to localStorage immediately
+      const localAssignments = JSON.parse(localStorage.getItem(USER_ASSIGNMENTS_KEY) || '{}');
+      localAssignments[userId] = {
+        ...localAssignments[userId],
+        departments: newDepartments
+      };
+      localStorage.setItem(USER_ASSIGNMENTS_KEY, JSON.stringify(localAssignments));
 
-    // Save to localStorage
-    const localAssignments = JSON.parse(localStorage.getItem(USER_ASSIGNMENTS_KEY) || '{}');
-    localAssignments[userId] = {
-      ...localAssignments[userId],
-      departments: newDepartments
-    };
-    localStorage.setItem(USER_ASSIGNMENTS_KEY, JSON.stringify(localAssignments));
+      console.log('UsersPage: Updated user departments locally:', userId, newDepartments);
 
-    console.log('UsersPage: Updated user departments locally:', userId, newDepartments);
+      // Dispatch custom event to notify other pages to refresh
+      window.dispatchEvent(new CustomEvent('userDepartmentsChanged', {
+        detail: { userId, departments: newDepartments }
+      }));
+
+      // Return updated users array - this triggers immediate UI update
+      return prevUsers.map(u => 
+        u.id === userId ? { ...u, departments: newDepartments } : u
+      );
+    });
   };
 
   // Handle role change
   const handleRoleChange = (userId, newRole) => {
-    // Update local state
-    setUsers(users.map(u => 
-      u.id === userId ? { ...u, role: newRole } : u
-    ));
+    // Use functional update to ensure we're working with latest state
+    setUsers(prevUsers => {
+      // Save to localStorage immediately
+      const localAssignments = JSON.parse(localStorage.getItem(USER_ASSIGNMENTS_KEY) || '{}');
+      localAssignments[userId] = {
+        ...localAssignments[userId],
+        role: newRole
+      };
+      localStorage.setItem(USER_ASSIGNMENTS_KEY, JSON.stringify(localAssignments));
 
-    // Save to localStorage
-    const localAssignments = JSON.parse(localStorage.getItem(USER_ASSIGNMENTS_KEY) || '{}');
-    localAssignments[userId] = {
-      ...localAssignments[userId],
-      role: newRole
-    };
-    localStorage.setItem(USER_ASSIGNMENTS_KEY, JSON.stringify(localAssignments));
+      console.log('UsersPage: Updated user role locally:', userId, newRole);
 
-    console.log('UsersPage: Updated user role locally:', userId, newRole);
+      // Dispatch custom event to notify other pages to refresh
+      window.dispatchEvent(new CustomEvent('userRoleChanged', {
+        detail: { userId, role: newRole }
+      }));
+
+      // Return updated users array - this triggers immediate UI update
+      return prevUsers.map(u => 
+        u.id === userId ? { ...u, role: newRole } : u
+      );
+    });
   };
 
   // Get department badge color

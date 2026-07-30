@@ -1,0 +1,14 @@
+# Azure Functions ignore file
+# Files and folders to exclude from deployment
+
+node_modules/
+.git/
+.gitignore
+*.log
+.DS_Store
+local.settings.json
+.vscode/
+.idea/
+*.swp
+*.swo
+*~

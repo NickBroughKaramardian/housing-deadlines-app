@@ -1,110 +1,101 @@
 import React from 'react';
+import { CheckIcon, ClockIcon, DocumentTextIcon, TrashIcon } from '@heroicons/react/24/outline';
+import { getTaskDeadline, parseDeadlineDate, getTaskStatus, getStatusColor } from './utils/taskHelpers';
 
 function TaskCard({ 
   task, 
   className = "",
-  users = [] // Add users prop for name conversion
+  users = [], // Add users prop for name conversion
+  onToggleComplete,
+  onToggleUrgent,
+  onNoteClick,
+  onDeleteClick
 }) {
 
   // Helper function to convert responsible party emails to names
   const getResponsiblePartyNames = (responsibleParty) => {
-    // Debug logging
-    console.log('TaskCard: getResponsiblePartyNames called with:', {
-      responsibleParty: responsibleParty,
-      responsiblePartyType: typeof responsibleParty,
-      responsiblePartyIsArray: Array.isArray(responsibleParty),
-      usersLength: users?.length,
-      users: users
-    });
+    if (!responsibleParty) {
+      return 'Unassigned';
+    }
     
-    if (!responsibleParty || !users || users.length === 0) {
-      console.log('TaskCard: No responsible party or users, returning:', responsibleParty || 'Unassigned');
-      return responsibleParty || 'Unassigned';
+    if (!users || users.length === 0) {
+      // If no users available, return the original value
+      return typeof responsibleParty === 'string' ? responsibleParty : String(responsibleParty);
     }
 
     // Handle different formats of ResponsibleParty
     let emails = [];
     
     if (Array.isArray(responsibleParty)) {
-      console.log('TaskCard: ResponsibleParty is array, processing items:', responsibleParty);
-      // If it's an array of objects, extract the email/name
+      // If it's an array, extract emails
       emails = responsibleParty.map(item => {
-        console.log('TaskCard: Processing array item:', item, 'type:', typeof item);
         if (typeof item === 'object' && item.LookupValue) {
-          console.log('TaskCard: Found LookupValue:', item.LookupValue);
           return item.LookupValue;
         }
         if (typeof item === 'object' && item.Email) {
-          console.log('TaskCard: Found Email:', item.Email);
           return item.Email;
         }
-        console.log('TaskCard: Converting to string:', String(item));
         return String(item);
       });
     } else if (typeof responsibleParty === 'string') {
-      console.log('TaskCard: ResponsibleParty is string, splitting by semicolon:', responsibleParty);
-      // If it's a string, split by semicolon
-      emails = responsibleParty.split(';').map(email => email.trim());
+      // If it's a string, split by comma or semicolon
+      emails = responsibleParty.split(/[,;]/).map(email => email.trim()).filter(email => email.length > 0);
     } else {
-      console.log('TaskCard: ResponsibleParty is other type, converting to string:', responsibleParty);
       // Fallback
       emails = [String(responsibleParty)];
     }
 
-    console.log('TaskCard: Extracted emails:', emails);
-
+    // Convert emails to names
     const names = emails.map(email => {
-      console.log('TaskCard: Looking for user with email:', email);
+      // Case-insensitive matching
+      const emailLower = email.toLowerCase();
       const user = users.find(u => {
-        const match = u.mail === email || 
-        u.userPrincipalName === email || 
-        u.email === email || 
-        u.Email === email;
-        if (match) {
-          console.log('TaskCard: Found matching user:', u);
-        }
-        return match;
+        const userEmail = (u.mail || u.userPrincipalName || u.email || u.Email || '').toLowerCase();
+        return userEmail === emailLower;
       });
       
       if (user) {
-        const displayName = user.displayName || user.DisplayName || user.mail || user.email;
-        console.log('TaskCard: Returning display name:', displayName);
-        return displayName;
+        return user.displayName || user.DisplayName || user.mail || user.email || email;
       }
       
-      console.log('TaskCard: No user found, returning original email:', email);
-      return email; // Return original if no match found
+      // Return original email if no match found
+      return email;
     });
     
-    const result = names.join(', ');
-    console.log('TaskCard: Final result:', result);
-    return result;
+    return names.join(', ');
   };
 
-  // Determine task status for theming
-  const isCompleted = task.Completed_x003f_ || task.Completed;
-  const isUrgent = task.Priority === 'Urgent';
-  const isOverdue = task.daysUntil < 0;
-  
-  // Get appropriate colors based on status
-  let cardClasses, textClasses, dateClasses;
-  if (isCompleted) {
-    cardClasses = 'bg-green-50 dark:bg-green-900/20 border-green-200 dark:border-green-700';
-    textClasses = 'text-green-800 dark:text-green-200 line-through';
-    dateClasses = 'text-green-600 dark:text-green-400';
-  } else if (isOverdue) {
-    cardClasses = 'bg-red-50 dark:bg-red-900/20 border-red-200 dark:border-red-700';
-    textClasses = 'text-red-800 dark:text-red-200';
-    dateClasses = 'text-red-600 dark:text-red-400';
-  } else if (isUrgent) {
-    cardClasses = 'bg-orange-50 dark:bg-orange-900/20 border-orange-200 dark:border-orange-700';
-    textClasses = 'text-orange-800 dark:text-orange-200';
-    dateClasses = 'text-orange-600 dark:text-orange-400';
-  } else {
-    cardClasses = 'bg-blue-50 dark:bg-blue-900/20 border-blue-200 dark:border-blue-700';
-    textClasses = 'text-blue-800 dark:text-blue-200';
-    dateClasses = 'text-blue-600 dark:text-blue-400';
-  }
+  const status = getTaskStatus(task);
+  const statusColor = getStatusColor(status);
+
+  const COLOR_THEME = {
+    green: {
+      card: 'bg-green-50 dark:bg-green-900/20 border-green-200 dark:border-green-700',
+      text: 'text-green-800 dark:text-green-200',
+      date: 'text-green-600 dark:text-green-400'
+    },
+    red: {
+      card: 'bg-red-50 dark:bg-red-900/20 border-red-200 dark:border-red-700',
+      text: 'text-red-800 dark:text-red-200',
+      date: 'text-red-600 dark:text-red-400'
+    },
+    orange: {
+      card: 'bg-orange-50 dark:bg-orange-900/20 border-orange-200 dark:border-orange-700',
+      text: 'text-orange-800 dark:text-orange-200',
+      date: 'text-orange-600 dark:text-orange-400'
+    },
+    blue: {
+      card: 'bg-blue-50 dark:bg-blue-900/20 border-blue-200 dark:border-blue-700',
+      text: 'text-blue-800 dark:text-blue-200',
+      date: 'text-blue-600 dark:text-blue-400'
+    }
+  };
+
+  const theme = COLOR_THEME[statusColor] || COLOR_THEME.blue;
+
+  const cardClasses = theme.card;
+  const baseTextClasses = theme.text;
+  const dateClasses = theme.date;
 
   // Action functions removed - use Database page for task management
 
@@ -112,37 +103,44 @@ function TaskCard({
 
   return (
     <>
-      <div className={`p-4 rounded-lg border transition-all duration-200 hover:shadow-md ${cardClasses} ${className}`}>
-        <div className="space-y-2">
+      <div className={`p-4 rounded-lg border transition-all duration-200 hover:shadow-md flex flex-col h-full ${cardClasses} ${className}`}>
+        {/* Content area - grows to push buttons down */}
+        <div className="flex-grow space-y-2">
           <div className="flex items-center justify-between mb-2">
-            <h4 className={`font-medium text-sm ${textClasses} flex-1 truncate`}>
+            <h4 className={`font-medium text-sm ${status === 'Completed' ? `line-through ${baseTextClasses}` : baseTextClasses} flex-1 truncate`}>
               {task.task || task.Task || task.title || task.description || 'Untitled Task'}
             </h4>
             <div className={`text-right ${dateClasses}`}>
               <div className="text-sm font-bold">
-                {task.Deadline || task.deadline ? (() => {
-                  const dateStr = task.Deadline || task.deadline;
-                  if (typeof dateStr === 'string' && dateStr.includes('-')) {
-                    const datePart = dateStr.split('T')[0];
-                    const parts = datePart.split('-');
-                    if (parts.length === 3) {
-                      const year = parseInt(parts[0], 10);
-                      const month = parseInt(parts[1], 10) - 1;
-                      const day = parseInt(parts[2], 10);
-                      const date = new Date(year, month, day, 12, 0, 0);
-                      return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
-                    }
-                  }
-                  return new Date(dateStr).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
-                })() : 'No date'}
+                {(() => {
+                  const deadlineStr = getTaskDeadline(task);
+                  if (!deadlineStr) return 'No date';
+                  const deadline = parseDeadlineDate(deadlineStr);
+                  if (!deadline) return 'No date';
+                  return deadline.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+                })()}
               </div>
               <div className="text-xs opacity-75">
-                {task.daysUntil === 0 ? 'Today' : 
-                 task.daysUntil === 1 ? 'Tomorrow' : 
-                 task.daysUntil > 1 ? `Due in ${task.daysUntil} days` :
-                 task.daysUntil === -1 ? 'Yesterday' :
-                 task.daysUntil < 0 ? `${Math.abs(task.daysUntil)} days ago` :
-                 'Due soon'}
+                {(() => {
+                  const deadlineStr = getTaskDeadline(task);
+                  const deadline = deadlineStr ? parseDeadlineDate(deadlineStr) : null;
+                  const today = new Date();
+                  today.setHours(0, 0, 0, 0);
+                  const deadlineStart = deadline ? new Date(deadline.getFullYear(), deadline.getMonth(), deadline.getDate()) : null;
+                  const calculatedDaysUntil = task.daysUntil !== undefined && task.daysUntil !== null
+                    ? task.daysUntil
+                    : deadlineStart
+                      ? Math.ceil((deadlineStart.getTime() - today.getTime()) / (1000 * 60 * 60 * 24))
+                      : null;
+
+                  if (calculatedDaysUntil === null) return 'No deadline';
+                  if (calculatedDaysUntil === 0) return 'Today';
+                  if (calculatedDaysUntil === 1) return 'Tomorrow';
+                  if (calculatedDaysUntil > 1) return `Due in ${calculatedDaysUntil} days`;
+                  if (calculatedDaysUntil === -1) return 'Yesterday';
+                  if (calculatedDaysUntil < 0) return `${Math.abs(calculatedDaysUntil)} days ago`;
+                  return 'Due soon';
+                })()}
               </div>
             </div>
           </div>
@@ -152,22 +150,84 @@ function TaskCard({
           </p>
           
           <p className="text-xs text-gray-500 dark:text-gray-400">
-            {String(getResponsiblePartyNames(task.ResponsibleParty || task.responsibleParty) || 'Unassigned')}
+            {getResponsiblePartyNames(task.responsibleParty || task.ResponsibleParty || '')}
           </p>
           
           {/* Notes */}
-          {(task.Notes || task.notes) && (
+          {(task.note || task.notes || task.Note || task.Notes) && (
             <p className="text-xs text-gray-600 dark:text-gray-400 italic mt-2 pt-2 border-t border-gray-200/30 dark:border-gray-600/20">
-              {task.Notes || task.notes}
+              {task.note || task.notes || task.Note || task.Notes}
             </p>
           )}
-          
-          {/* Action buttons removed - use Database page for task management */}
-          
         </div>
+        
+        {/* Action buttons - always at bottom */}
+        {(onToggleComplete || onToggleUrgent || onNoteClick || onDeleteClick) && (
+          <div className="flex items-center justify-end gap-1 mt-3 pt-2 border-t border-gray-200/30 dark:border-gray-600/20">
+            {onToggleComplete && (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onToggleComplete(task.id, task.completed || task.Completed || task.Completed_x003f_);
+                }}
+                className={`p-1.5 rounded-lg transition-colors duration-200 ${
+                  task.completed || task.Completed || task.Completed_x003f_
+                    ? 'bg-green-100 text-green-600 hover:bg-green-200 dark:bg-green-900/30 dark:text-green-400 dark:hover:bg-green-900/50'
+                    : 'bg-gray-100 text-gray-600 hover:bg-gray-200 dark:bg-gray-700 dark:text-gray-400 dark:hover:bg-gray-600'
+                }`}
+                title={task.completed || task.Completed || task.Completed_x003f_ ? 'Mark incomplete' : 'Mark complete'}
+              >
+                <CheckIcon className="w-3.5 h-3.5" />
+              </button>
+            )}
+            {onToggleUrgent && (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  const isUrgent = (task.priority || task.Priority || '').toLowerCase() === 'urgent';
+                  onToggleUrgent(task.id, isUrgent);
+                }}
+                className={`p-1.5 rounded-lg transition-colors duration-200 ${
+                  (task.priority || task.Priority || '').toLowerCase() === 'urgent'
+                    ? 'bg-orange-100 text-orange-600 hover:bg-orange-200 dark:bg-orange-900/30 dark:text-orange-400 dark:hover:bg-orange-900/50'
+                    : 'bg-gray-100 text-gray-600 hover:bg-gray-200 dark:bg-gray-700 dark:text-gray-400 dark:hover:bg-gray-600'
+                }`}
+                title={(task.priority || task.Priority || '').toLowerCase() === 'urgent' ? 'Remove urgent' : 'Mark urgent'}
+              >
+                <ClockIcon className="w-3.5 h-3.5" />
+              </button>
+            )}
+            {onNoteClick && (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onNoteClick(task);
+                }}
+                className={`p-1.5 rounded-lg transition-colors duration-200 ${
+                  task.note || task.notes || task.Note || task.Notes
+                    ? 'bg-purple-100 text-purple-600 hover:bg-purple-200 dark:bg-purple-900/30 dark:text-purple-400 dark:hover:bg-purple-900/50'
+                    : 'bg-gray-100 text-gray-600 hover:bg-gray-200 dark:bg-gray-700 dark:text-gray-400 dark:hover:bg-gray-600'
+                }`}
+                title="Add/edit notes"
+              >
+                <DocumentTextIcon className="w-3.5 h-3.5" />
+              </button>
+            )}
+            {onDeleteClick && (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onDeleteClick(task.id, task);
+                }}
+                className="p-1.5 rounded-lg bg-red-100 text-red-600 hover:bg-red-200 dark:bg-red-900/30 dark:text-red-400 dark:hover:bg-red-900/50 transition-colors duration-200"
+                title="Delete task"
+              >
+                <TrashIcon className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
+        )}
       </div>
-
-      {/* Delete modal removed - use Database page for task management */}
     </>
   );
 }

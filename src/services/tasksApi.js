@@ -37,28 +37,6 @@ export async function createTask(task) {
     diagnosticLogger.log('API: createTask - SUCCESS', { path, createdTask: data });
     return data;
   } catch (error) {
-    // Check if this is a CORS error
-    const isCorsError = error.message?.includes('CORS') || 
-                       error.message?.includes('Access-Control-Allow-Origin') ||
-                       error.name === 'TypeError' && error.message?.includes('Failed to fetch');
-    
-    if (isCorsError) {
-      const corsError = new Error(
-        `CORS Error: The API at ${API}${path} is not allowing requests from this origin. ` +
-        `This is a backend configuration issue. Please ensure the Azure Functions app has CORS configured ` +
-        `to allow requests from ${window.location.origin}. Error: ${error.message}`
-      );
-      diagnosticLogger.log('API: createTask - CORS ERROR', { 
-        path, 
-        task, 
-        error: error.message,
-        origin: window.location.origin,
-        apiUrl: `${API}${path}`,
-        corsError: corsError.message
-      }, 'error');
-      throw corsError;
-    }
-    
     diagnosticLogger.log('API: createTask - ERROR', { path, task, error: error.message }, 'error');
     throw error;
   }

@@ -1,15 +1,18 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { 
   CalendarDaysIcon, 
   ClockIcon, 
   CheckCircleIcon,
   ExclamationTriangleIcon
 } from '@heroicons/react/24/outline';
-import { azureTaskService } from './services/azureTaskService';
+import { taskManager } from './services/taskManager';
 import { microsoftDataService } from './microsoftDataService';
 import TaskCard from './TaskCard';
+import NoteModal from './components/NoteModal';
+import DeleteConfirmModal from './components/DeleteConfirmModal';
 import { format, parseISO, startOfWeek, endOfWeek, isWithinInterval, isSameDay, addDays, subDays } from 'date-fns';
-import { filterDeadlineTasks, getTaskDeadline, parseDeadlineDate } from './utils/taskHelpers';
+import { filterDeadlineTasks, getTaskDeadline, parseDeadlineDate, getTaskStatus, getStatusColor, taskBelongsToUserDepartments } from './utils/taskHelpers';
+import { useAuth } from './Auth';
 
 function CalendarDeadlinesPage() {
   const [tasks, setTasks] = useState([]);
@@ -17,25 +20,62 @@ function CalendarDeadlinesPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [currentDate, setCurrentDate] = useState(new Date());
   const [viewMode, setViewMode] = useState('month'); // 'week', 'month'
+  const [departmentFilterEnabled, setDepartmentFilterEnabled] = useState(false);
+  
+  // Modal states
+  const [noteModal, setNoteModal] = useState({ isOpen: false, task: null });
+  const [deleteModal, setDeleteModal] = useState({ isOpen: false, taskId: null, taskName: null });
+  
+  const { userProfile } = useAuth();
 
-  // Load tasks and users from Azure Functions API
+  const STATUS_THEME = useMemo(() => ({
+    blue: {
+      dot: 'bg-blue-600 dark:bg-blue-400',
+      banner: 'bg-blue-100 dark:bg-blue-900/30 text-blue-800 dark:text-blue-200'
+    },
+    orange: {
+      dot: 'bg-orange-600 dark:bg-orange-400',
+      banner: 'bg-orange-100 dark:bg-orange-900/30 text-orange-800 dark:text-orange-200'
+    },
+    red: {
+      dot: 'bg-red-600 dark:bg-red-400',
+      banner: 'bg-red-100 dark:bg-red-900/30 text-red-800 dark:text-red-200'
+    },
+    green: {
+      dot: 'bg-green-600 dark:bg-green-400',
+      banner: 'bg-green-100 dark:bg-green-900/30 text-green-800 dark:text-green-200'
+    }
+  }), []);
+
+  // Load tasks from TaskManager
+  const loadTasks = useCallback(async (forceRefresh = false) => {
+    try {
+      setIsLoading(true);
+      
+      // Initialize TaskManager if not already initialized or force refresh requested
+      if (forceRefresh || !taskManager.isInitialized) {
+        await taskManager.initialize(forceRefresh);
+      }
+      
+      // Get tasks from TaskManager (from memory, no API call)
+      const allTasks = taskManager.getAllTasks();
+      
+      // Filter out recurring templates - only show actual deadline instances
+      const deadlineTasks = filterDeadlineTasks(Array.isArray(allTasks) ? allTasks : []);
+      setTasks(deadlineTasks);
+    } catch (err) {
+      console.error('Calendar: Error loading tasks:', err);
+      setTasks([]);
+    } finally {
+      setIsLoading(false);
+    }
+  }, []);
+
+  // Load users
   useEffect(() => {
-    const loadData = async () => {
+    const loadUsers = async () => {
       try {
-        setIsLoading(true);
-        const [loadedTasks, usersData] = await Promise.all([
-          azureTaskService.loadAllTasks({ useCache: false }).catch(err => {
-            console.error('Calendar: Error loading tasks:', err);
-            return [];
-          }),
-          microsoftDataService.users.getEnterpriseUsers().catch(err => {
-            console.error('Calendar: Error loading users:', err);
-            return [];
-          })
-        ]);
-        // Filter out recurring templates - only show actual deadline instances
-        const deadlineTasks = filterDeadlineTasks(Array.isArray(loadedTasks) ? loadedTasks : []);
-        setTasks(deadlineTasks);
+        const usersData = await microsoftDataService.users.getEnterpriseUsers();
         
         // Merge enterprise users with local assignments (same as Dashboard)
         const USER_ASSIGNMENTS_KEY = 'user_assignments';
@@ -49,28 +89,182 @@ function CalendarDeadlinesPage() {
         
         setUsers(usersWithAssignments);
       } catch (err) {
-        console.error('Calendar: Error loading data:', err);
-        setTasks([]);
+        console.error('Calendar: Error loading users:', err);
         setUsers([]);
-      } finally {
-        setIsLoading(false);
+      }
+    };
+    
+    loadUsers();
+    
+    // Listen for department/role changes and refresh users in background
+    const handleUserChange = async () => {
+      console.log('Calendar: User departments/roles changed, refreshing users...');
+      try {
+        const usersData = await microsoftDataService.users.getEnterpriseUsers();
+        const USER_ASSIGNMENTS_KEY = 'user_assignments';
+        const localAssignments = JSON.parse(localStorage.getItem(USER_ASSIGNMENTS_KEY) || '{}');
+        const usersWithAssignments = (Array.isArray(usersData) ? usersData : []).map(user => ({
+          ...user,
+          departments: localAssignments[user.id]?.departments || [],
+          role: localAssignments[user.id]?.role || 'VIEWER'
+        }));
+        setUsers(usersWithAssignments);
+      } catch (err) {
+        console.error('Calendar: Error refreshing users:', err);
       }
     };
 
-    loadData();
+    window.addEventListener('userDepartmentsChanged', handleUserChange);
+    window.addEventListener('userRoleChanged', handleUserChange);
     
-    // Poll for updates every 30 seconds
-    const interval = setInterval(async () => {
-      try {
-        const loadedTasks = await azureTaskService.loadAllTasks({ useCache: false });
-        const deadlineTasks = filterDeadlineTasks(Array.isArray(loadedTasks) ? loadedTasks : []);
-        setTasks(deadlineTasks);
-      } catch (err) {
-        console.error('Calendar: Error polling for updates:', err);
-      }
-    }, 30000);
-    return () => clearInterval(interval);
+    return () => {
+      window.removeEventListener('userDepartmentsChanged', handleUserChange);
+      window.removeEventListener('userRoleChanged', handleUserChange);
+    };
   }, []);
+
+  // Load department filter setting
+  useEffect(() => {
+    const loadDepartmentFilterSetting = () => {
+      try {
+        const saved = localStorage.getItem('departmentFilterEnabled');
+        setDepartmentFilterEnabled(saved === 'true');
+      } catch (err) {
+        console.error('Calendar: Error loading department filter setting:', err);
+      }
+    };
+
+    loadDepartmentFilterSetting();
+
+    // Listen for setting changes
+    const handleSettingChange = (event) => {
+      const { enabled } = event.detail || {};
+      setDepartmentFilterEnabled(enabled);
+    };
+
+    window.addEventListener('departmentFilterSettingChanged', handleSettingChange);
+
+    return () => {
+      window.removeEventListener('departmentFilterSettingChanged', handleSettingChange);
+    };
+  }, []);
+
+  // Get current user's departments
+  const getCurrentUserDepartments = () => {
+    if (!userProfile?.id) return [];
+    const USER_ASSIGNMENTS_KEY = 'user_assignments';
+    const localAssignments = JSON.parse(localStorage.getItem(USER_ASSIGNMENTS_KEY) || '{}');
+    return localAssignments[userProfile.id]?.departments || [];
+  };
+
+  // Filter tasks by department if setting is enabled
+  const getFilteredTasks = (taskList) => {
+    if (!departmentFilterEnabled) {
+      return taskList;
+    }
+    
+    const userDepartments = getCurrentUserDepartments();
+    if (!userDepartments || userDepartments.length === 0) {
+      return taskList; // If user has no departments, show all
+    }
+
+    return taskList.filter(task => 
+      taskBelongsToUserDepartments(task, userDepartments, users)
+    );
+  };
+
+  // Load tasks and subscribe to TaskManager events
+  useEffect(() => {
+    loadTasks(true);
+    
+    // Subscribe to TaskManager events for instant updates
+    const unsubscribe = taskManager.subscribe(({ type, tasks: updatedTasks, task, taskId, ...data }) => {
+      if (type === 'refreshed' || type === 'created' || type === 'updated' || type === 'deleted' || type === 'batchCreated' || type === 'batchUpdated' || type === 'batchDeleted') {
+        // Reload tasks from TaskManager
+        const allTasks = taskManager.getAllTasks();
+        const deadlineTasks = filterDeadlineTasks(Array.isArray(allTasks) ? allTasks : []);
+        setTasks(deadlineTasks);
+      }
+      
+      if (type === 'loading') {
+        setIsLoading(data.isLoading);
+      }
+    });
+    
+    // Also listen to DOM events for cross-component communication
+    const handleTaskDataChanged = (event) => {
+      const { type } = event.detail;
+      if (type === 'refreshed' || type === 'created' || type === 'updated' || type === 'deleted' || type === 'batchCreated' || type === 'batchUpdated' || type === 'batchDeleted') {
+        const allTasks = taskManager.getAllTasks();
+        const deadlineTasks = filterDeadlineTasks(Array.isArray(allTasks) ? allTasks : []);
+        setTasks(deadlineTasks);
+      }
+    };
+    
+    window.addEventListener('taskDataChanged', handleTaskDataChanged);
+    
+    // Legacy event listener for backward compatibility
+    const handleTaskDeleted = () => {
+      loadTasks(true);
+    };
+    window.addEventListener('taskDeleted', handleTaskDeleted);
+    
+    return () => {
+      unsubscribe();
+      window.removeEventListener('taskDataChanged', handleTaskDataChanged);
+      window.removeEventListener('taskDeleted', handleTaskDeleted);
+    };
+  }, [loadTasks]);
+
+  // Action handlers for TaskCard
+  const handleToggleComplete = useCallback(async (taskId, currentStatus) => {
+    try {
+      await taskManager.updateTask(taskId, { completed: !currentStatus });
+    } catch (error) {
+      console.error('CalendarDeadlines: Error toggling completion:', error);
+    }
+  }, []);
+
+  const handleToggleUrgent = useCallback(async (taskId, currentUrgency) => {
+    try {
+      await taskManager.updateTask(taskId, { priority: currentUrgency ? 'Normal' : 'Urgent' });
+    } catch (error) {
+      console.error('CalendarDeadlines: Error toggling urgency:', error);
+    }
+  }, []);
+
+  const handleNoteClick = useCallback((task) => {
+    setNoteModal({ isOpen: true, task });
+  }, []);
+
+  const handleNoteSave = useCallback(async (taskId, noteContent) => {
+    try {
+      await taskManager.updateTask(taskId, { note: noteContent });
+      setNoteModal({ isOpen: false, task: null });
+    } catch (error) {
+      console.error('CalendarDeadlines: Error saving note:', error);
+    }
+  }, []);
+
+  const handleDeleteClick = useCallback((taskId, task) => {
+    setDeleteModal({ 
+      isOpen: true, 
+      taskId, 
+      taskName: task.title || task.task || task.Task || 'this task' 
+    });
+  }, []);
+
+  const handleDeleteConfirm = useCallback(async () => {
+    if (!deleteModal.taskId) return;
+    
+    try {
+      await taskManager.deleteTask(deleteModal.taskId);
+      setDeleteModal({ isOpen: false, taskId: null, taskName: null });
+    } catch (error) {
+      console.error('CalendarDeadlines: Error deleting task:', error);
+      setDeleteModal({ isOpen: false, taskId: null, taskName: null });
+    }
+  }, [deleteModal]);
 
   // Get tasks for the current view
   const getTasksForView = useMemo(() => {
@@ -84,12 +278,14 @@ function CalendarDeadlinesPage() {
       ? endOfWeek(currentDate, { weekStartsOn: 1 })
       : new Date(currentDate.getFullYear(), currentDate.getMonth() + 1, 0);
 
-    return tasks.filter(task => {
+    const viewTasks = tasks.filter(task => {
       const deadline = parseDeadlineDate(getTaskDeadline(task));
       if (!deadline) return false;
       return isWithinInterval(deadline, { start: startDate, end: endDate });
     });
-  }, [tasks, currentDate, viewMode]);
+    
+    return getFilteredTasks(viewTasks);
+  }, [tasks, currentDate, viewMode, departmentFilterEnabled, userProfile, users]);
 
   // Group tasks by date
   const tasksByDate = useMemo(() => {
@@ -112,13 +308,17 @@ function CalendarDeadlinesPage() {
   // Get calendar days for the current view
   const getCalendarDays = useMemo(() => {
     const days = [];
-    const startDate = viewMode === 'week' 
+
+    const firstDayOfMonth = new Date(currentDate.getFullYear(), currentDate.getMonth(), 1);
+    const lastDayOfMonth = new Date(currentDate.getFullYear(), currentDate.getMonth() + 1, 0);
+
+    const startDate = viewMode === 'week'
       ? startOfWeek(currentDate, { weekStartsOn: 1 })
-      : new Date(currentDate.getFullYear(), currentDate.getMonth(), 1);
+      : startOfWeek(firstDayOfMonth, { weekStartsOn: 1 });
     
     const endDate = viewMode === 'week'
       ? endOfWeek(currentDate, { weekStartsOn: 1 })
-      : new Date(currentDate.getFullYear(), currentDate.getMonth() + 1, 0);
+      : endOfWeek(lastDayOfMonth, { weekStartsOn: 1 });
 
     const current = new Date(startDate);
     while (current <= endDate) {
@@ -284,14 +484,18 @@ function CalendarDeadlinesPage() {
 
                     {/* Tasks for this day */}
                     <div className="space-y-1">
-                      {day.tasks.slice(0, 3).map((task, taskIndex) => (
-                        <div
-                          key={`${task.id}-${taskIndex}`}
-                          className="text-xs p-1 rounded bg-blue-100 dark:bg-blue-900/30 text-blue-800 dark:text-blue-200 truncate"
-                        >
-                          {task.title || task.task || 'Untitled Task'}
-                        </div>
-                      ))}
+                      {day.tasks.slice(0, 3).map((task, taskIndex) => {
+                        const status = getTaskStatus(task);
+                        const theme = STATUS_THEME[getStatusColor(status)] || STATUS_THEME.blue;
+                        return (
+                          <div
+                            key={`${task.id}-${taskIndex}`}
+                            className={`text-xs p-1 rounded ${theme.banner} truncate`}
+                          >
+                            {task.title || task.task || 'Untitled Task'}
+                          </div>
+                        );
+                      })}
                       {day.tasks.length > 3 && (
                         <div className="text-xs text-gray-500 dark:text-gray-400">
                           +{day.tasks.length - 3} more
@@ -312,7 +516,7 @@ function CalendarDeadlinesPage() {
               </h2>
               
               {/* Sort tasks chronologically */}
-              <div className="space-y-3 max-h-[600px] overflow-y-auto">
+              <div className="space-y-3 max-h-[600px] overflow-y-auto hide-scrollbar">
                 {getTasksForView
                   .sort((a, b) => {
                     const dateA = parseDeadlineDate(getTaskDeadline(a));
@@ -326,6 +530,10 @@ function CalendarDeadlinesPage() {
                       task={task}
                       users={users}
                       className="hover:shadow-md transition-shadow"
+                      onToggleComplete={handleToggleComplete}
+                      onToggleUrgent={handleToggleUrgent}
+                      onNoteClick={handleNoteClick}
+                      onDeleteClick={handleDeleteClick}
                     />
                   ))}
               </div>
@@ -340,6 +548,20 @@ function CalendarDeadlinesPage() {
           </div>
         </div>
       </div>
+
+      {/* Modals */}
+      <NoteModal
+        isOpen={noteModal.isOpen}
+        onClose={() => setNoteModal({ isOpen: false, task: null })}
+        task={noteModal.task}
+        onSave={handleNoteSave}
+      />
+      <DeleteConfirmModal
+        isOpen={deleteModal.isOpen}
+        onClose={() => setDeleteModal({ isOpen: false, taskId: null, taskName: null })}
+        onConfirm={handleDeleteConfirm}
+        itemName={deleteModal.taskName}
+      />
     </div>
   );
 }

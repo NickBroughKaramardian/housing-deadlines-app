@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import Dashboard from './Dashboard';
 import Database from './Database';
 import UsersPage from './UsersPage';
@@ -9,7 +9,10 @@ import UserMenu from './UserMenu';
 import SortDeadlinesPage from './SortDeadlinesPage';
 import GanttDeadlinesPage from './GanttDeadlinesPage';
 import CalendarDeadlinesPage from './CalendarDeadlinesPage';
+import ReportsPage from './ReportsPage';
 import ExitConfirmationPopup from './ExitConfirmationPopup';
+import BatchImportProgress from './components/BatchImportProgress';
+import BatchDeleteProgress from './components/BatchDeleteProgress';
 import { useAuth } from './Auth';
 import { globalTaskStore } from './globalTaskStore';
 import { microsoftDataService } from './microsoftDataService';
@@ -26,6 +29,8 @@ function App() {
   const [syncLoading, setSyncLoading] = useState(false);
   const [showExitConfirmation, setShowExitConfirmation] = useState(false);
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
+  const [importProgress, setImportProgress] = useState(null);
+  const [deleteProgress, setDeleteProgress] = useState(null);
 
   // Handle dropdown hover with delay
   const handleDropdownMouseEnter = () => {
@@ -77,45 +82,19 @@ function App() {
     setShowExitConfirmation(false);
   };
 
-  // Load tasks from Azure Functions API
+  // Initialize Azure service (but let individual pages load their own data)
   useEffect(() => {
-    const loadAllData = async () => {
+    const initialize = async () => {
       if (userProfile) {
         try {
-          globalTaskStore.setLoading(true);
-          console.log('App: Loading all data from Azure Functions API...');
-          
-          // Initialize Azure service
           await azureTaskService.initialize();
-          
-          // Load all tasks from Azure Functions API
-          const allTasks = await azureTaskService.loadAllTasks();
-          console.log('App: Loaded', allTasks.length, 'tasks from Azure Functions API');
-          
-          // Set tasks in global store
-          globalTaskStore.setAllTasks(allTasks);
-          console.log('App: Global store populated with', allTasks.length, 'tasks');
-
-          // Auto-clean duplicates first
-          console.log('App: Auto-cleaning duplicates...');
-          const duplicatesRemoved = globalTaskStore.removeDuplicates();
-          if (duplicatesRemoved.length > 0) {
-            console.log('App: Auto-removed', duplicatesRemoved.length, 'duplicates');
-          } else {
-            console.log('App: No duplicates found');
-          }
-          
-          console.log('App: Data loading completed successfully');
-          
+          console.log('App: Azure service initialized');
         } catch (error) {
-          console.error('App: Error loading data:', error);
-        } finally {
-          globalTaskStore.setLoading(false);
+          console.error('App: Error initializing Azure service:', error);
         }
       }
     };
-
-    loadAllData();
+    initialize();
   }, [userProfile]);
 
   // Load users for Dashboard
@@ -150,7 +129,56 @@ function App() {
     };
 
     loadUsers();
+
+    // Listen for department/role changes and refresh users in background
+    const handleUserChange = () => {
+      console.log('App: User departments/roles changed, refreshing users...');
+      loadUsers();
+    };
+
+    window.addEventListener('userDepartmentsChanged', handleUserChange);
+    window.addEventListener('userRoleChanged', handleUserChange);
+
+    return () => {
+      window.removeEventListener('userDepartmentsChanged', handleUserChange);
+      window.removeEventListener('userRoleChanged', handleUserChange);
+    };
   }, [userProfile]);
+
+  // Listen for import progress updates from Database component
+  useEffect(() => {
+    const handleImportProgressUpdate = (event) => {
+      const { progress } = event.detail;
+      setImportProgress(progress);
+    };
+
+    window.addEventListener('importProgressUpdate', handleImportProgressUpdate);
+    return () => {
+      window.removeEventListener('importProgressUpdate', handleImportProgressUpdate);
+    };
+  }, []);
+
+  // Listen for delete progress updates from Database component
+  useEffect(() => {
+    const handleDeleteProgressUpdate = (event) => {
+      const { progress } = event.detail;
+      setDeleteProgress(progress);
+    };
+
+    window.addEventListener('deleteProgressUpdate', handleDeleteProgressUpdate);
+    return () => {
+      window.removeEventListener('deleteProgressUpdate', handleDeleteProgressUpdate);
+    };
+  }, []);
+
+  // Memoize onClose callbacks to prevent unnecessary re-renders
+  const handleCloseProgress = useCallback(() => {
+    setImportProgress(null);
+  }, []);
+
+  const handleCloseDeleteProgress = useCallback(() => {
+    setDeleteProgress(null);
+  }, []);
 
   if (!userProfile) {
     return (
@@ -247,6 +275,12 @@ function App() {
               )}
             </div>
             <button 
+              onClick={() => { setActiveTab('reports'); setIsMobileMenuOpen(false); }} 
+              className={`w-full px-4 py-3 rounded-lg text-left font-medium ${activeTab === 'reports' ? 'bg-theme-primary text-white' : 'bg-gray-100 hover:bg-gray-300 dark:bg-gray-700 dark:hover:bg-gray-600 text-gray-700 dark:text-gray-300'}`}
+            >
+              Reports
+            </button>
+            <button 
               onClick={() => { setActiveTab('database'); setIsMobileMenuOpen(false); }} 
               className={`w-full px-4 py-3 rounded-lg text-left font-medium ${activeTab === 'database' ? 'bg-theme-primary text-white' : 'bg-gray-100 hover:bg-gray-300 dark:bg-gray-700 dark:hover:bg-gray-600 text-gray-700 dark:text-gray-300'}`}
             >
@@ -337,7 +371,13 @@ function App() {
               )}
             </div>
             <button 
-              onClick={() => setActiveTab('database')} 
+              onClick={() => setActiveTab('reports')}
+              className={`px-4 py-2 rounded-lg text-sm font-medium ${activeTab === 'reports' ? 'bg-theme-primary text-white' : 'bg-gray-100 hover:bg-gray-300 dark:bg-gray-700 dark:hover:bg-gray-600 text-gray-700 dark:text-gray-300'}`}
+            >
+              Reports
+            </button>
+            <button 
+              onClick={() => setActiveTab('database')}
               className={`px-4 py-2 rounded-lg text-sm font-medium ${activeTab === 'database' ? 'bg-theme-primary text-white' : 'bg-gray-100 hover:bg-gray-300 dark:bg-gray-700 dark:hover:bg-gray-600 text-gray-700 dark:text-gray-300'}`}
             >
               Database
@@ -366,7 +406,7 @@ function App() {
       </div>
 
       {/* Main Content */}
-      <div className="flex-1 overflow-y-auto">
+      <div className={`flex-1 overflow-y-auto ${(activeTab === 'database' || (activeTab === 'deadlines' && deadlinesSubTab === 'sort')) ? 'scrollbar-themed' : 'hide-scrollbar'}`}>
         {activeTab === 'dashboard' && <Dashboard users={users} />}
         {activeTab === 'deadlines' && (
           <>
@@ -377,6 +417,7 @@ function App() {
         )}
         {activeTab === 'users' && <UsersPage />}
         {activeTab === 'data' && <DataPage />}
+        {activeTab === 'reports' && <ReportsPage />}
         {activeTab === 'database' && <Database />}
         {activeTab === 'settings' && <SettingsPage />}
       </div>
@@ -390,6 +431,22 @@ function App() {
         onCancel={handleExitCancel}
         message="You have unsaved changes. Are you sure you want to leave?"
       />
+
+      {/* Batch Import Progress - Persists across all pages */}
+      {importProgress && (
+        <BatchImportProgress
+          progress={importProgress}
+          onClose={handleCloseProgress}
+        />
+      )}
+
+      {/* Batch Delete Progress - Persists across all pages */}
+      {deleteProgress && (
+        <BatchDeleteProgress
+          progress={deleteProgress}
+          onClose={handleCloseDeleteProgress}
+        />
+      )}
     </div>
   );
 }

@@ -30,7 +30,7 @@ try {
         status: 200, 
         headers: {
           'Content-Type': 'application/json',
-          // CORS is handled automatically by Azure portal configuration
+          'Access-Control-Allow-Origin': '*'
         },
         jsonBody: { 
           message: 'API is working!', 

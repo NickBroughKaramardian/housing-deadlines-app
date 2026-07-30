@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { format, parse, isValid, differenceInDays, startOfYear, endOfYear, startOfWeek, endOfWeek, startOfMonth, endOfMonth, isWithinInterval, parseISO } from 'date-fns';
 import {
   ChartBarIcon,
@@ -13,75 +13,191 @@ import {
   ArrowTrendingDownIcon,
   SparklesIcon
 } from '@heroicons/react/24/outline';
-import { globalTaskStore } from './globalTaskStore';
+import { taskManager } from './services/taskManager';
 import { microsoftDataService } from './microsoftDataService';
+import { filterDeadlineTasks } from './utils/taskHelpers';
 
 function DataPage() {
   const [tasks, setTasks] = useState([]);
   const [users, setUsers] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [selectedYear, setSelectedYear] = useState(new Date().getFullYear());
 
+  // Load tasks from TaskManager
+  const loadTasks = useCallback(async (forceRefresh = false) => {
+    try {
+      setLoading(true);
+      
+      // Initialize TaskManager if not already initialized or if a force refresh is requested
+      if (forceRefresh || !taskManager.isInitialized) {
+        await taskManager.initialize(forceRefresh);
+      }
+      
+      // Get tasks from TaskManager (from memory, no API call)
+      const allTasks = taskManager.getAllTasks();
+      
+      // Filter out recurring templates - only show actual deadline instances
+      const deadlineTasks = filterDeadlineTasks(Array.isArray(allTasks) ? allTasks : []);
+      setTasks(deadlineTasks);
+    } catch (error) {
+      console.error('DataPage: Error loading tasks:', error);
+      setTasks([]);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  // Load users
   useEffect(() => {
-    const loadData = async () => {
+    const loadUsers = async () => {
       try {
-        setLoading(true);
+        const usersData = await microsoftDataService.users.getEnterpriseUsers();
         
-        // Subscribe to global task store updates
-        const unsubscribe = globalTaskStore.subscribe(() => {
-          const allTasks = globalTaskStore.getAllTasks();
-          setTasks(allTasks);
-        });
+        // Merge enterprise users with local assignments (same as Dashboard)
+        const USER_ASSIGNMENTS_KEY = 'user_assignments';
+        const localAssignments = JSON.parse(localStorage.getItem(USER_ASSIGNMENTS_KEY) || '{}');
         
-        // Get initial data
-        const [allTasks, usersData] = await Promise.all([
-          globalTaskStore.getAllTasks(),
-          microsoftDataService.users.getEnterpriseUsers()
-        ]);
-        setTasks(allTasks);
-        setUsers(usersData);
+        const usersWithAssignments = (Array.isArray(usersData) ? usersData : []).map(user => ({
+          ...user,
+          departments: localAssignments[user.id]?.departments || [],
+          role: localAssignments[user.id]?.role || 'VIEWER'
+        }));
         
-        return unsubscribe;
-      } catch (error) {
-        console.error('DataPage: Error loading data:', error);
-      } finally {
-        setLoading(false);
+        setUsers(usersWithAssignments);
+      } catch (err) {
+        console.error('DataPage: Error loading users:', err);
+        setUsers([]);
+      }
+    };
+    
+    loadUsers();
+    
+    // Listen for department/role changes and refresh users in background
+    const handleUserChange = async () => {
+      console.log('DataPage: User departments/roles changed, refreshing users...');
+      try {
+        const usersData = await microsoftDataService.users.getEnterpriseUsers();
+        const USER_ASSIGNMENTS_KEY = 'user_assignments';
+        const localAssignments = JSON.parse(localStorage.getItem(USER_ASSIGNMENTS_KEY) || '{}');
+        const usersWithAssignments = (Array.isArray(usersData) ? usersData : []).map(user => ({
+          ...user,
+          departments: localAssignments[user.id]?.departments || [],
+          role: localAssignments[user.id]?.role || 'VIEWER'
+        }));
+        setUsers(usersWithAssignments);
+      } catch (err) {
+        console.error('DataPage: Error refreshing users:', err);
       }
     };
 
-    loadData();
+    window.addEventListener('userDepartmentsChanged', handleUserChange);
+    window.addEventListener('userRoleChanged', handleUserChange);
+    
+    return () => {
+      window.removeEventListener('userDepartmentsChanged', handleUserChange);
+      window.removeEventListener('userRoleChanged', handleUserChange);
+    };
   }, []);
+
+  // Load tasks and subscribe to TaskManager events
+  useEffect(() => {
+    loadTasks(true);
+    
+    // Subscribe to TaskManager events for instant updates
+    const unsubscribe = taskManager.subscribe(({ type, tasks: updatedTasks, task, taskId, ...data }) => {
+      if (type === 'refreshed' || type === 'created' || type === 'updated' || type === 'deleted' || type === 'batchCreated' || type === 'batchUpdated' || type === 'batchDeleted') {
+        // Reload tasks from TaskManager
+        const allTasks = taskManager.getAllTasks();
+        const deadlineTasks = filterDeadlineTasks(Array.isArray(allTasks) ? allTasks : []);
+        setTasks(deadlineTasks);
+      }
+      
+      if (type === 'loading') {
+        setLoading(data.isLoading);
+      }
+    });
+    
+    // Also listen to DOM events for cross-component communication
+    const handleTaskDataChanged = (event) => {
+      const { type } = event.detail;
+      if (type === 'refreshed' || type === 'created' || type === 'updated' || type === 'deleted' || type === 'batchCreated' || type === 'batchUpdated' || type === 'batchDeleted') {
+        const allTasks = taskManager.getAllTasks();
+        const deadlineTasks = filterDeadlineTasks(Array.isArray(allTasks) ? allTasks : []);
+        setTasks(deadlineTasks);
+      }
+    };
+    
+    window.addEventListener('taskDataChanged', handleTaskDataChanged);
+    
+    return () => {
+      unsubscribe();
+      window.removeEventListener('taskDataChanged', handleTaskDataChanged);
+    };
+  }, [loadTasks]);
 
   // Helper function to parse deadline dates
   const parseDeadlineDate = (dateStr) => {
     if (!dateStr) return null;
     try {
-      const isoDate = new Date(dateStr);
-      if (!isNaN(isoDate.getTime())) {
-        return isoDate;
+      // Parse date string carefully to avoid timezone issues
+      // If in yyyy-MM-dd format, parse components directly
+      if (typeof dateStr === 'string' && dateStr.includes('-')) {
+        const datePart = dateStr.split('T')[0]; // Get just the date part
+        const parts = datePart.split('-');
+        if (parts.length === 3) {
+          const year = parseInt(parts[0], 10);
+          const month = parseInt(parts[1], 10) - 1; // JS months are 0-indexed
+          const day = parseInt(parts[2], 10);
+          
+          if (!isNaN(year) && !isNaN(month) && !isNaN(day)) {
+            // Create date at noon local time to avoid timezone shifts
+            return new Date(year, month, day, 12, 0, 0);
+          }
+        }
       }
-      const parsed = parse(dateStr, 'yyyy-MM-dd', new Date());
-      return isValid(parsed) ? parsed : null;
+      
+      // Fallback to date-fns parsing for other formats
+      const parsed = parseISO(dateStr);
+      if (isValid(parsed)) {
+        parsed.setHours(12, 0, 0, 0);
+        return parsed;
+      }
+      
+      return null;
     } catch {
       return null;
     }
   };
 
-  // Get current year tasks
-  const getCurrentYearTasks = () => {
-    const currentYear = new Date().getFullYear();
-    const yearStart = startOfYear(new Date(currentYear, 0, 1));
-    const yearEnd = endOfYear(new Date(currentYear, 11, 31));
+  // Get tasks for a specific year (or all time if 'all')
+  const getYearTasks = useCallback((year) => {
+    if (year === 'all') return tasks; // All time
+    
+    const yearStart = startOfYear(new Date(year, 0, 1));
+    const yearEnd = endOfYear(new Date(year, 11, 31));
     
     return tasks.filter(task => {
-      const deadline = parseDeadlineDate(task.Deadline);
+      const deadline = parseDeadlineDate(task.deadline || task.deadline_date || task.Deadline);
       return deadline && isWithinInterval(deadline, { start: yearStart, end: yearEnd });
     });
-  };
+  }, [tasks]);
+
+  // Get all available years from tasks
+  const getAvailableYears = useCallback(() => {
+    const years = new Set();
+    tasks.forEach(task => {
+      const deadline = parseDeadlineDate(task.deadline || task.deadline_date || task.Deadline);
+      if (deadline) {
+        years.add(deadline.getFullYear());
+      }
+    });
+    return Array.from(years).sort((a, b) => b - a); // Newest first
+  }, [tasks]);
 
   // Calculate comprehensive metrics
   const metrics = useMemo(() => {
     const currentYear = new Date().getFullYear();
-    const currentYearTasks = getCurrentYearTasks();
+    const selectedYearTasks = getYearTasks(selectedYear);
     const thisWeekStart = startOfWeek(new Date());
     const thisWeekEnd = endOfWeek(new Date());
     const thisMonthStart = startOfMonth(new Date());
@@ -89,61 +205,44 @@ function DataPage() {
 
     // Helper to check completion
     const isCompleted = (task) => 
-      task.Completed_x003f_ === true || task.Completed_x003f_ === 'Yes' || 
-      task.Completed_x003f_ === 'yes' || task.Completed === true ||
-      task.Completed === 'Yes' || task.Completed === 'yes';
+      task.completed === true || task.completed === 'Yes' || 
+      task.completed === 'yes' || task.Completed_x003f_ === true || 
+      task.Completed_x003f_ === 'Yes' || task.Completed_x003f_ === 'yes' || 
+      task.Completed === true || task.Completed === 'Yes' || task.Completed === 'yes';
 
     // Total counts
     const totalTasksAllTime = tasks.length;
-    const totalTasksThisYear = currentYearTasks.length;
+    const totalTasksThisYear = selectedYearTasks.length;
     const completedTasksAllTime = tasks.filter(isCompleted).length;
-    const completedTasksThisYear = currentYearTasks.filter(isCompleted).length;
+    const completedTasksThisYear = selectedYearTasks.filter(isCompleted).length;
 
     // Due this week/month/year
     const tasksThisWeek = tasks.filter(task => {
-      const deadline = parseDeadlineDate(task.Deadline);
+      const deadline = parseDeadlineDate(task.deadline || task.deadline_date || task.Deadline);
       return deadline && isWithinInterval(deadline, { start: thisWeekStart, end: thisWeekEnd });
     });
     
     const tasksThisMonth = tasks.filter(task => {
-      const deadline = parseDeadlineDate(task.Deadline);
+      const deadline = parseDeadlineDate(task.deadline || task.deadline_date || task.Deadline);
       return deadline && isWithinInterval(deadline, { start: thisMonthStart, end: thisMonthEnd });
     });
 
     // Task types (Priority)
-    const urgentTasksAllTime = tasks.filter(t => t.Priority === 'Urgent').length;
-    const urgentTasksThisYear = currentYearTasks.filter(t => t.Priority === 'Urgent').length;
-    const normalTasksAllTime = tasks.filter(t => t.Priority !== 'Urgent').length;
-    const normalTasksThisYear = currentYearTasks.filter(t => t.Priority !== 'Urgent').length;
+    const urgentTasksAllTime = tasks.filter(t => t.priority === 'Urgent' || t.Priority === 'Urgent').length;
+    const urgentTasksThisYear = selectedYearTasks.filter(t => t.priority === 'Urgent' || t.Priority === 'Urgent').length;
+    const normalTasksAllTime = tasks.filter(t => t.priority !== 'Urgent' && t.Priority !== 'Urgent').length;
+    const normalTasksThisYear = selectedYearTasks.filter(t => t.priority !== 'Urgent' && t.Priority !== 'Urgent').length;
 
     // Overdue tasks
     const now = new Date();
     const overdueTasks = tasks.filter(task => {
       if (isCompleted(task)) return false;
-      const deadline = parseDeadlineDate(task.Deadline);
+      const deadline = parseDeadlineDate(task.deadline || task.deadline_date || task.Deadline);
       return deadline && deadline < now;
     });
 
-    // Calculate average completion time before due date
-    const completedTasksWithData = tasks.filter(task => {
-      if (!isCompleted(task)) return false;
-      const deadline = parseDeadlineDate(task.Deadline);
-      // Check if task has a Modified date that we can use as completion date
-      return deadline && task.Modified;
-    });
 
-    let avgDaysBeforeDue = 0;
-    if (completedTasksWithData.length > 0) {
-      const totalDays = completedTasksWithData.reduce((sum, task) => {
-        const deadline = parseDeadlineDate(task.Deadline);
-        const completedDate = new Date(task.Modified);
-        const daysBeforeDue = differenceInDays(deadline, completedDate);
-        return sum + daysBeforeDue;
-      }, 0);
-      avgDaysBeforeDue = Math.round(totalDays / completedTasksWithData.length);
-    }
-
-    // Department metrics
+    // Department metrics - use same logic as Dashboard
     const USER_ASSIGNMENTS_KEY = 'user_assignments';
     let localAssignments = {};
     try {
@@ -155,36 +254,100 @@ function DataPage() {
       console.error('DataPage: Error loading user assignments:', error);
     }
 
-    const departments = ['Development', 'Accounting', 'Compliance', 'Management'];
+    const DEPARTMENTS = {
+      DEVELOPMENT: 'development',
+      ACCOUNTING: 'accounting', 
+      COMPLIANCE: 'compliance',
+      MANAGEMENT: 'management'
+    };
+
+    const DEPARTMENT_NAMES = {
+      [DEPARTMENTS.DEVELOPMENT]: 'Development',
+      [DEPARTMENTS.ACCOUNTING]: 'Accounting',
+      [DEPARTMENTS.COMPLIANCE]: 'Compliance',
+      [DEPARTMENTS.MANAGEMENT]: 'Management'
+    };
+
     const departmentMetrics = {};
     
-    departments.forEach(dept => {
-      const deptTasks = currentYearTasks.filter(task => {
-        const responsibleParty = task.ResponsibleParty;
-        if (!responsibleParty) return false;
-        
-        const emails = responsibleParty.split(';').map(e => e.trim());
-        return emails.some(email => {
-          const assignment = localAssignments[email];
-          return assignment && assignment.departments && assignment.departments.includes(dept);
-        });
-      });
-
-      const completedDeptTasks = deptTasks.filter(isCompleted);
-      
-      departmentMetrics[dept] = {
-        total: deptTasks.length,
-        completed: completedDeptTasks.length,
-        percentage: deptTasks.length > 0 ? Math.round((completedDeptTasks.length / deptTasks.length) * 100) : 0
+    // Initialize all departments
+    Object.values(DEPARTMENTS).forEach(dept => {
+      departmentMetrics[DEPARTMENT_NAMES[dept]] = {
+        total: 0,
+        completed: 0,
+        percentage: 0
       };
     });
+    
+    if (users && users.length > 0) {
+      selectedYearTasks.forEach(task => {
+        const responsibleParty = task.responsibleParty || task.ResponsibleParty || '';
+        
+        // Find all users assigned to this task (same logic as Dashboard)
+        const assignedUsers = users.filter(user => {
+          const userEmail = user.email || user.Email || user.mail || user.userPrincipalName || '';
+          const userDisplayName = user.displayName || user.DisplayName || '';
+          
+          let responsiblePartyStr = '';
+          if (typeof responsibleParty === 'string') {
+            responsiblePartyStr = responsibleParty;
+          } else if (Array.isArray(responsibleParty)) {
+            responsiblePartyStr = responsibleParty.map(item => {
+              if (typeof item === 'object' && item.LookupValue) {
+                return item.LookupValue;
+              }
+              if (typeof item === 'object' && item.Email) {
+                return item.Email;
+              }
+              return String(item);
+            }).join('; ');
+          } else if (responsibleParty && typeof responsibleParty === 'object') {
+            responsiblePartyStr = responsibleParty.LookupValue || responsibleParty.Email || String(responsibleParty);
+          } else {
+            responsiblePartyStr = String(responsibleParty || '');
+          }
+          
+          return responsiblePartyStr && responsiblePartyStr.trim() !== '' && 
+                 (responsiblePartyStr.includes(userEmail) || responsiblePartyStr.includes(userDisplayName));
+        });
+        
+        // Collect all unique departments from all assigned users
+        const taskDepartments = new Set();
+        assignedUsers.forEach(assignedUser => {
+          const userDepartments = assignedUser.departments || [];
+          userDepartments.forEach(department => {
+            taskDepartments.add(department);
+          });
+        });
+        
+        // Determine completion status
+        const isCompletedTask = isCompleted(task);
+        
+        // Count this task once for each unique department
+        taskDepartments.forEach(department => {
+          const deptName = DEPARTMENT_NAMES[department];
+          if (deptName && departmentMetrics[deptName]) {
+            departmentMetrics[deptName].total++;
+            if (isCompletedTask) {
+              departmentMetrics[deptName].completed++;
+            }
+          }
+        });
+      });
+      
+      // Calculate percentages
+      Object.keys(departmentMetrics).forEach(deptName => {
+        const stats = departmentMetrics[deptName];
+        stats.percentage = stats.total > 0 ? Math.round((stats.completed / stats.total) * 100) : 0;
+      });
+    }
 
     // Project metrics
-    const projects = [...new Set(currentYearTasks.map(t => t.Project).filter(Boolean))];
+    const projects = [...new Set(selectedYearTasks.map(t => (t.project || t.Project || 'Unassigned')).filter(Boolean))];
     const projectMetrics = {};
     
     projects.forEach(project => {
-      const projectTasks = currentYearTasks.filter(t => t.Project === project);
+      const projectTasks = selectedYearTasks.filter(t => (t.project || t.Project || 'Unassigned') === project);
       const completedProjectTasks = projectTasks.filter(isCompleted);
       
       projectMetrics[project] = {
@@ -196,27 +359,40 @@ function DataPage() {
 
     // User metrics
     const userMetrics = users.map(user => {
-      const userEmail = user.mail || user.userPrincipalName || user.email;
-      const userDisplayName = user.displayName || user.DisplayName || userEmail;
+      const userEmail = user.mail || user.userPrincipalName || user.email || user.Email;
+      const userDisplayName = user.displayName || user.displayName || user.DisplayName || userEmail;
       
-      const userTasks = currentYearTasks.filter(task => {
-        const responsibleParty = task.ResponsibleParty;
+      const userTasks = selectedYearTasks.filter(task => {
+        const responsibleParty = task.responsibleParty || task.ResponsibleParty || '';
         if (!responsibleParty) return false;
         
+        let responsiblePartyStr = '';
+        if (typeof responsibleParty === 'string') {
+          responsiblePartyStr = responsibleParty;
+        } else if (Array.isArray(responsibleParty)) {
+          responsiblePartyStr = responsibleParty.map(item => {
+            if (typeof item === 'object' && item.LookupValue) return item.LookupValue;
+            if (typeof item === 'object' && item.Email) return item.Email;
+            return String(item);
+          }).join('; ');
+        } else {
+          responsiblePartyStr = String(responsibleParty || '');
+        }
+        
         // Try matching by email first
-        if (responsibleParty.toLowerCase().includes(userEmail.toLowerCase())) {
+        if (responsiblePartyStr.toLowerCase().includes(userEmail.toLowerCase())) {
           return true;
         }
         
         // Try matching by display name
-        if (responsibleParty.toLowerCase().includes(userDisplayName.toLowerCase())) {
+        if (responsiblePartyStr.toLowerCase().includes(userDisplayName.toLowerCase())) {
           return true;
         }
         
         // Try matching by initials + display name (like "NK Nick Karamardian")
         const initials = userDisplayName.split(' ').map(n => n.charAt(0)).join('');
         const initialsWithName = `${initials} ${userDisplayName}`.toLowerCase();
-        if (responsibleParty.toLowerCase().includes(initialsWithName)) {
+        if (responsiblePartyStr.toLowerCase().includes(initialsWithName)) {
           return true;
         }
         
@@ -226,7 +402,7 @@ function DataPage() {
       const completedUserTasks = userTasks.filter(isCompleted);
       
       return {
-        name: user.displayName || user.DisplayName || userEmail,
+        name: userDisplayName,
         email: userEmail,
         total: userTasks.length,
         completed: completedUserTasks.length,
@@ -246,14 +422,13 @@ function DataPage() {
       normalTasksAllTime,
       normalTasksThisYear,
       overdueTasks: overdueTasks.length,
-      avgDaysBeforeDue,
       completionRateAllTime: totalTasksAllTime > 0 ? Math.round((completedTasksAllTime / totalTasksAllTime) * 100) : 0,
       completionRateThisYear: totalTasksThisYear > 0 ? Math.round((completedTasksThisYear / totalTasksThisYear) * 100) : 0,
       departmentMetrics,
       projectMetrics,
       userMetrics
     };
-  }, [tasks, users]);
+  }, [tasks, users, selectedYear, getYearTasks]);
 
   if (loading) {
     return (
@@ -264,7 +439,7 @@ function DataPage() {
   }
 
   return (
-    <div className="space-y-6 p-6">
+    <div className="min-h-screen bg-gray-50 dark:bg-gray-900 space-y-6 p-6">
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
@@ -287,10 +462,27 @@ function DataPage() {
 
       {/* Summary Cards - All Time */}
       <div>
-        <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-4 flex items-center gap-2">
-          <SparklesIcon className="w-6 h-6 text-blue-500" />
-          All-Time Overview
-        </h2>
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-xl font-semibold text-gray-900 dark:text-white flex items-center gap-2">
+            <SparklesIcon className="w-6 h-6 text-blue-500" />
+            All-Time Overview
+          </h2>
+          
+          {/* Year Filter Dropdown */}
+          <div className="flex items-center gap-2">
+            <span className="text-sm font-medium text-gray-700 dark:text-gray-300">Filter by:</span>
+            <select
+              value={selectedYear}
+              onChange={(e) => setSelectedYear(e.target.value === 'all' ? 'all' : parseInt(e.target.value))}
+              className="px-3 py-1.5 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 text-sm font-medium shadow-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
+            >
+              <option value="all">All Time</option>
+              {getAvailableYears().map(year => (
+                <option key={year} value={year}>{year}</option>
+              ))}
+            </select>
+          </div>
+        </div>
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
           <div className="bg-gradient-to-br from-blue-50 to-blue-100 dark:from-blue-900/20 dark:to-blue-800/20 rounded-xl p-6 border border-blue-200 dark:border-blue-700">
             <div className="flex items-center justify-between">
@@ -383,25 +575,7 @@ function DataPage() {
           <ArrowTrendingUpIcon className="w-6 h-6 text-green-500" />
           Performance Metrics
         </h2>
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          <div className="bg-gradient-to-br from-emerald-50 to-teal-50 dark:from-emerald-900/20 dark:to-teal-900/20 rounded-xl p-6 border border-emerald-200 dark:border-emerald-700">
-            <div className="flex items-center gap-3 mb-3">
-              <div className="p-2 bg-emerald-500 rounded-lg">
-                <ClockIcon className="w-5 h-5 text-white" />
-              </div>
-              <div>
-                <p className="text-sm font-medium text-emerald-900 dark:text-emerald-300">Avg. Completion Time</p>
-                <p className="text-xs text-emerald-700 dark:text-emerald-400">Days before deadline</p>
-              </div>
-            </div>
-            <p className="text-4xl font-bold text-emerald-600 dark:text-emerald-400">
-              {metrics.avgDaysBeforeDue > 0 ? `+${metrics.avgDaysBeforeDue}` : metrics.avgDaysBeforeDue}
-            </p>
-            <p className="text-xs text-emerald-700 dark:text-emerald-300 mt-2">
-              {metrics.avgDaysBeforeDue > 0 ? 'Completed early on average' : metrics.avgDaysBeforeDue < 0 ? 'Completed late on average' : 'On-time completion'}
-            </p>
-          </div>
-
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div className="bg-gradient-to-br from-blue-50 to-cyan-50 dark:from-blue-900/20 dark:to-cyan-900/20 rounded-xl p-6 border border-blue-200 dark:border-blue-700">
             <div className="flex items-center gap-3 mb-3">
               <div className="p-2 bg-blue-500 rounded-lg">
@@ -452,7 +626,7 @@ function DataPage() {
       <div>
         <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-4 flex items-center gap-2">
           <BuildingOfficeIcon className="w-6 h-6 text-indigo-500" />
-          Department Progress ({new Date().getFullYear()})
+          Department Progress ({selectedYear === 'all' ? 'All Time' : selectedYear})
         </h2>
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
           {Object.entries(metrics.departmentMetrics).map(([dept, data]) => (
@@ -483,7 +657,7 @@ function DataPage() {
       <div>
         <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-4 flex items-center gap-2">
           <FolderIcon className="w-6 h-6 text-cyan-500" />
-          Project Progress ({new Date().getFullYear()})
+          Project Progress ({selectedYear === 'all' ? 'All Time' : selectedYear})
         </h2>
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
           {Object.entries(metrics.projectMetrics).slice(0, 9).map(([project, data]) => (
@@ -514,10 +688,10 @@ function DataPage() {
       <div>
         <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-4 flex items-center gap-2">
           <UserIcon className="w-6 h-6 text-pink-500" />
-          User Progress ({new Date().getFullYear()})
+          User Progress ({selectedYear === 'all' ? 'All Time' : selectedYear})
         </h2>
         <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 shadow-sm overflow-hidden">
-          <div className="overflow-x-auto">
+          <div className="overflow-x-auto hide-scrollbar">
             <table className="w-full">
               <thead className="bg-gray-50 dark:bg-gray-700">
                 <tr>

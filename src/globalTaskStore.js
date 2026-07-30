@@ -67,6 +67,20 @@ export const globalTaskStore = {
     notify();
   },
 
+  removeTask(id) {
+    state.tasks = state.tasks.filter(t => t.id !== id);
+    notify();
+  },
+
+  addTask(task) {
+    // Check if task already exists
+    const exists = state.tasks.some(t => t.id === task.id);
+    if (!exists) {
+      state.tasks = [...state.tasks, task];
+      notify();
+    }
+  },
+
   toggleTaskSelection(id) {
     const i = state.selectedTasks.indexOf(id);
     if (i === -1) state.selectedTasks.push(id);
