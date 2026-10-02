@@ -1,12 +1,12 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { 
   UserGroupIcon, 
   ShieldCheckIcon, 
-  BuildingOfficeIcon,
-  CheckIcon
+  BuildingOfficeIcon
 } from '@heroicons/react/24/outline';
-import { microsoftDataService } from './microsoftDataService';
 import { useAuth } from './Auth';
+import { useUsers, getUserEmail } from './hooks/useUsers';
+import { getUserAssignments, saveUserAssignment } from './services/usersApi';
 
 // Department constants
 const DEPARTMENTS = {
@@ -30,122 +30,137 @@ const DEPARTMENT_COLORS = {
   [DEPARTMENTS.MANAGEMENT]: 'bg-orange-500'
 };
 
-// Role constants
+// Role constants (must match the backend userAssignments contract)
 const ROLES = {
   ADMIN: 'ADMIN',
+  MANAGER: 'MANAGER',
+  MEMBER: 'MEMBER',
   VIEWER: 'VIEWER'
 };
 
 const ROLE_NAMES = {
   [ROLES.ADMIN]: 'Admin',
+  [ROLES.MANAGER]: 'Manager',
+  [ROLES.MEMBER]: 'Member',
   [ROLES.VIEWER]: 'Viewer'
-};
-
-const ROLE_DESCRIPTIONS = {
-  [ROLES.ADMIN]: 'Can view and edit all data',
-  [ROLES.VIEWER]: 'Can only view data'
 };
 
 const ROLE_COLORS = {
   [ROLES.ADMIN]: 'bg-red-500',
+  [ROLES.MANAGER]: 'bg-purple-500',
+  [ROLES.MEMBER]: 'bg-green-500',
   [ROLES.VIEWER]: 'bg-blue-500'
 };
 
+const USER_ASSIGNMENTS_KEY = 'user_assignments';
+
 function UsersPage() {
-  const [users, setUsers] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const { userProfile, hasPermission } = useAuth();
+  const { users: loadedUsers, isLoading: loading } = useUsers();
+  const { userProfile } = useAuth();
+  const isAdmin = userProfile?.role === ROLES.ADMIN;
 
-  // Local storage key for user assignments
-  const USER_ASSIGNMENTS_KEY = 'user_assignments';
+  // Optimistic local overrides (keyed by email) so button clicks reflect
+  // immediately while the PUT is in flight.
+  const [overrides, setOverrides] = useState({});
+  const migrationAttemptedRef = useRef(false);
 
-  // Load enterprise users and local assignments
-  useEffect(() => {
-    const loadUsers = async () => {
-      try {
-        setLoading(true);
-        // Get enterprise users from Microsoft Graph
-        const usersData = await microsoftDataService.users.getEnterpriseUsers();
-        
-        // Load local assignments from localStorage
-        const localAssignments = JSON.parse(localStorage.getItem(USER_ASSIGNMENTS_KEY) || '{}');
-        
-        // Merge enterprise users with local assignments
-        const usersWithAssignments = usersData.map(user => ({
-          ...user,
-          departments: localAssignments[user.id]?.departments || [],
-          role: localAssignments[user.id]?.role || ROLES.VIEWER
-        }));
-        
-        setUsers(usersWithAssignments);
-        console.log('UsersPage: Loaded', usersData.length, 'enterprise users with local assignments');
-      } catch (error) {
-        console.error('UsersPage: Error loading enterprise users:', error);
-      } finally {
-        setLoading(false);
-      }
-    };
-    loadUsers();
-  }, []);
-
-  // Handle department toggle
-  const handleDepartmentToggle = (userId, department) => {
-    // Use functional update to ensure we're working with latest state
-    setUsers(prevUsers => {
-      const user = prevUsers.find(u => u.id === userId);
-      if (!user) return prevUsers;
-      
-      const currentDepartments = user.departments || [];
-      const newDepartments = currentDepartments.includes(department)
-        ? currentDepartments.filter(d => d !== department)
-        : [...currentDepartments, department];
-
-      // Save to localStorage immediately
-      const localAssignments = JSON.parse(localStorage.getItem(USER_ASSIGNMENTS_KEY) || '{}');
-      localAssignments[userId] = {
-        ...localAssignments[userId],
-        departments: newDepartments
-      };
-      localStorage.setItem(USER_ASSIGNMENTS_KEY, JSON.stringify(localAssignments));
-
-      console.log('UsersPage: Updated user departments locally:', userId, newDepartments);
-
-      // Dispatch custom event to notify other pages to refresh
-      window.dispatchEvent(new CustomEvent('userDepartmentsChanged', {
-        detail: { userId, departments: newDepartments }
-      }));
-
-      // Return updated users array - this triggers immediate UI update
-      return prevUsers.map(u => 
-        u.id === userId ? { ...u, departments: newDepartments } : u
-      );
+  const users = useMemo(() => {
+    return loadedUsers.map(user => {
+      const email = getUserEmail(user).toLowerCase();
+      const override = email ? overrides[email] : null;
+      return override ? { ...user, ...override } : user;
     });
+  }, [loadedUsers, overrides]);
+
+  // One-time migration (S4): if the backend has no assignments yet, the
+  // current user is an ADMIN, and legacy localStorage assignments exist,
+  // push them to the API once. localStorage is no longer read for
+  // authorization decisions anywhere else.
+  useEffect(() => {
+    if (migrationAttemptedRef.current) return;
+    if (!isAdmin || loadedUsers.length === 0) return;
+    migrationAttemptedRef.current = true;
+
+    (async () => {
+      try {
+        const existing = await getUserAssignments();
+        if (existing.length > 0) return;
+
+        let localAssignments = {};
+        try {
+          localAssignments = JSON.parse(localStorage.getItem(USER_ASSIGNMENTS_KEY) || '{}');
+        } catch {
+          return;
+        }
+        const entries = Object.entries(localAssignments);
+        if (entries.length === 0) return;
+
+        console.log('UsersPage: migrating', entries.length, 'localStorage assignments to the userAssignments API');
+        for (const [userId, assignment] of entries) {
+          const user = loadedUsers.find(u => u.id === userId);
+          const email = user ? getUserEmail(user) : null;
+          if (!email) continue;
+          await saveUserAssignment({
+            email,
+            role: assignment.role || ROLES.VIEWER,
+            departments: assignment.departments || []
+          });
+        }
+        window.dispatchEvent(new Event('userAssignmentsChanged'));
+      } catch (error) {
+        console.warn('UsersPage: assignment migration skipped:', error.message);
+      }
+    })();
+  }, [isAdmin, loadedUsers]);
+
+  // Persist an assignment via PUT /api/userAssignments (ADMIN only)
+  const saveAssignment = useCallback(async (user, changes) => {
+    const email = getUserEmail(user);
+    if (!email) {
+      alert('This user has no email address and cannot be assigned.');
+      return;
+    }
+
+    const next = {
+      role: changes.role !== undefined ? changes.role : (user.role || ROLES.VIEWER),
+      departments: changes.departments !== undefined ? changes.departments : (user.departments || [])
+    };
+
+    const emailKey = email.toLowerCase();
+    const previousOverride = overrides[emailKey];
+    setOverrides(prev => ({ ...prev, [emailKey]: next }));
+
+    try {
+      await saveUserAssignment({ email, ...next });
+      // Notify useUsers consumers (Dashboard etc.) to reload assignments
+      window.dispatchEvent(new Event('userAssignmentsChanged'));
+    } catch (error) {
+      console.error('UsersPage: Error saving assignment:', error);
+      alert(`Failed to save assignment: ${error.message}`);
+      // Roll back the optimistic override
+      setOverrides(prev => {
+        const copy = { ...prev };
+        if (previousOverride) {
+          copy[emailKey] = previousOverride;
+        } else {
+          delete copy[emailKey];
+        }
+        return copy;
+      });
+    }
+  }, [overrides]);
+
+  const handleDepartmentToggle = (user, department) => {
+    const currentDepartments = user.departments || [];
+    const newDepartments = currentDepartments.includes(department)
+      ? currentDepartments.filter(d => d !== department)
+      : [...currentDepartments, department];
+    saveAssignment(user, { departments: newDepartments });
   };
 
-  // Handle role change
-  const handleRoleChange = (userId, newRole) => {
-    // Use functional update to ensure we're working with latest state
-    setUsers(prevUsers => {
-      // Save to localStorage immediately
-      const localAssignments = JSON.parse(localStorage.getItem(USER_ASSIGNMENTS_KEY) || '{}');
-      localAssignments[userId] = {
-        ...localAssignments[userId],
-        role: newRole
-      };
-      localStorage.setItem(USER_ASSIGNMENTS_KEY, JSON.stringify(localAssignments));
-
-      console.log('UsersPage: Updated user role locally:', userId, newRole);
-
-      // Dispatch custom event to notify other pages to refresh
-      window.dispatchEvent(new CustomEvent('userRoleChanged', {
-        detail: { userId, role: newRole }
-      }));
-
-      // Return updated users array - this triggers immediate UI update
-      return prevUsers.map(u => 
-        u.id === userId ? { ...u, role: newRole } : u
-      );
-    });
+  const handleRoleChange = (user, newRole) => {
+    if (user.role === newRole) return;
+    saveAssignment(user, { role: newRole });
   };
 
   // Get department badge color
@@ -157,7 +172,6 @@ function UsersPage() {
   const getRoleBadgeColor = (role) => {
     return ROLE_COLORS[role] || 'bg-gray-500';
   };
-
 
   if (loading) {
     return (
@@ -178,7 +192,9 @@ function UsersPage() {
           <div>
             <h1 className="text-3xl font-bold text-gray-900 dark:text-white">User Management</h1>
             <p className="text-gray-600 dark:text-gray-400 mt-1">
-              Assign departments to enterprise users
+              {isAdmin
+                ? 'Assign roles and departments to enterprise users'
+                : 'View enterprise users and their assignments (admin access required to edit)'}
             </p>
           </div>
         </div>
@@ -198,54 +214,67 @@ function UsersPage() {
                     </div>
                     <div>
                       <h3 className="font-medium text-gray-900 dark:text-white">{user.displayName || user.DisplayName}</h3>
-                      <p className="text-sm text-gray-600 dark:text-gray-400">{user.email || user.Email}</p>
+                      <p className="text-sm text-gray-600 dark:text-gray-400">{getUserEmail(user)}</p>
                     </div>
                   </div>
                   
-                  <div className="flex items-center gap-6">
-                    {/* Role Selection */}
-                    <div className="flex gap-1">
-                      {Object.entries(ROLE_NAMES).map(([key, name]) => {
-                        const isSelected = user.role === key;
-                        return (
-                          <button
-                            key={key}
-                            onClick={() => handleRoleChange(user.id, key)}
-                            className={`px-3 py-1 rounded-full text-sm font-medium transition-colors ${
-                              isSelected
-                                ? `${getRoleBadgeColor(key)} text-white`
-                                : 'bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-600'
-                            }`}
-                          >
-                            {name}
-                          </button>
-                        );
-                      })}
-                    </div>
+                  {isAdmin ? (
+                    <div className="flex items-center gap-6">
+                      {/* Role Selection */}
+                      <div className="flex gap-1">
+                        {Object.entries(ROLE_NAMES).map(([key, name]) => {
+                          const isSelected = user.role === key;
+                          return (
+                            <button
+                              key={key}
+                              onClick={() => handleRoleChange(user, key)}
+                              className={`px-3 py-1 rounded-full text-sm font-medium transition-colors ${
+                                isSelected
+                                  ? `${getRoleBadgeColor(key)} text-white`
+                                  : 'bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-600'
+                              }`}
+                            >
+                              {name}
+                            </button>
+                          );
+                        })}
+                      </div>
 
-                    {/* Separator */}
-                    <div className="w-px h-6 bg-gray-300 dark:bg-gray-600"></div>
+                      {/* Separator */}
+                      <div className="w-px h-6 bg-gray-300 dark:bg-gray-600"></div>
 
-                    {/* Department Selection Buttons */}
-                    <div className="flex gap-1">
-                      {Object.entries(DEPARTMENT_NAMES).map(([key, name]) => {
-                        const isAssigned = (user.departments || []).includes(key);
-                        return (
-                          <button
-                            key={key}
-                            onClick={() => handleDepartmentToggle(user.id, key)}
-                            className={`px-3 py-1 rounded-full text-sm font-medium transition-colors ${
-                              isAssigned
-                                ? `${getDepartmentBadgeColor(key)} text-white`
-                                : 'bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-600'
-                            }`}
-                          >
-                            {name}
-                          </button>
-                        );
-                      })}
+                      {/* Department Selection Buttons */}
+                      <div className="flex gap-1">
+                        {Object.entries(DEPARTMENT_NAMES).map(([key, name]) => {
+                          const isAssigned = (user.departments || []).includes(key);
+                          return (
+                            <button
+                              key={key}
+                              onClick={() => handleDepartmentToggle(user, key)}
+                              className={`px-3 py-1 rounded-full text-sm font-medium transition-colors ${
+                                isAssigned
+                                  ? `${getDepartmentBadgeColor(key)} text-white`
+                                  : 'bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-600'
+                              }`}
+                            >
+                              {name}
+                            </button>
+                          );
+                        })}
+                      </div>
                     </div>
-                  </div>
+                  ) : (
+                    <div className="flex items-center gap-2">
+                      <span className={`px-3 py-1 rounded-full text-sm font-medium text-white ${getRoleBadgeColor(user.role)}`}>
+                        {ROLE_NAMES[user.role] || 'Viewer'}
+                      </span>
+                      {(user.departments || []).map(dept => (
+                        <span key={dept} className={`px-3 py-1 rounded-full text-sm font-medium text-white ${getDepartmentBadgeColor(dept)}`}>
+                          {DEPARTMENT_NAMES[dept] || dept}
+                        </span>
+                      ))}
+                    </div>
+                  )}
                 </div>
               </div>
             ))}
@@ -315,11 +344,11 @@ function UsersPage() {
                             {member.displayName || member.DisplayName}
                           </p>
                           <p className="text-xs text-gray-500 dark:text-gray-400 truncate">
-                            {member.email || member.Email}
+                            {getUserEmail(member)}
                           </p>
                         </div>
                         <span className={`px-2 py-1 rounded-full text-xs font-medium text-white ${getRoleBadgeColor(member.role)}`}>
-                          {ROLE_NAMES[member.role]}
+                          {ROLE_NAMES[member.role] || 'Viewer'}
                         </span>
                       </div>
                     ))

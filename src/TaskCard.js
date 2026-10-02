@@ -2,7 +2,7 @@ import React from 'react';
 import { CheckIcon, ClockIcon, DocumentTextIcon, TrashIcon } from '@heroicons/react/24/outline';
 import { getTaskDeadline, parseDeadlineDate, getTaskStatus, getStatusColor } from './utils/taskHelpers';
 
-function TaskCard({ 
+const TaskCard = React.memo(function TaskCard({ 
   task, 
   className = "",
   users = [], // Add users prop for name conversion
@@ -230,6 +230,6 @@ function TaskCard({
       </div>
     </>
   );
-}
+});
 
 export default TaskCard;

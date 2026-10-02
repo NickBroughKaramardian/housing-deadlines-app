@@ -1,32 +1,24 @@
 import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import { 
-  ChartBarIcon, 
   ChevronLeftIcon, 
   ChevronRightIcon,
-  CheckCircleIcon,
-  ExclamationTriangleIcon,
-  ClockIcon,
-  UserIcon,
-  FolderIcon,
-  CalendarDaysIcon,
   ChevronDownIcon,
   FunnelIcon
 } from '@heroicons/react/24/outline';
-import { format, startOfYear, endOfYear, parseISO, isValid, differenceInDays, startOfMonth, eachMonthOfInterval, isWithinInterval, startOfDay, isSameDay } from 'date-fns';
-// globalTaskStore removed - using TaskManager instead
+import { format, startOfYear, endOfYear, differenceInDays, eachMonthOfInterval, startOfDay } from 'date-fns';
 import { taskManager } from './services/taskManager';
-import { microsoftDataService } from './microsoftDataService';
 import TaskCard from './TaskCard';
 import NoteModal from './components/NoteModal';
 import DeleteConfirmModal from './components/DeleteConfirmModal';
+import GanttTaskListItem from './components/GanttTaskListItem';
 import { getTaskDeadline, parseDeadlineDate, filterDeadlineTasks, getTaskStatus, getStatusColor, isTaskCompleted, taskBelongsToUserDepartments } from './utils/taskHelpers';
 import { useAuth } from './Auth';
+import { useTasks } from './hooks/useTasks';
+import { useUsers } from './hooks/useUsers';
 
 function GanttDeadlinesPage() {
-  const [tasks, setTasks] = useState([]);
-  const [users, setUsers] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [updating, setUpdating] = useState(false);
+  const { tasks: allTasks, isLoading: loading } = useTasks();
+  const { users } = useUsers();
   const [selectedYear, setSelectedYear] = useState(new Date().getFullYear());
   const [selectedMonth, setSelectedMonth] = useState(null);
   const [selectedTask, setSelectedTask] = useState(null);
@@ -41,97 +33,19 @@ function GanttDeadlinesPage() {
   
   const { userProfile } = useAuth();
 
-  // Toggle task completion using TaskManager
-  const toggleTaskCompletion = useCallback(async (taskId, currentStatus, shouldUpdateAll = false) => {
-    const newStatus = !currentStatus;
-    
-    try {
-      setUpdating(true);
-      
-      if (shouldUpdateAll) {
-        // Find all related tasks (same Task name and Project)
-        const currentTask = tasks.find(t => t.id === taskId);
-        if (currentTask) {
-          const relatedTasks = tasks.filter(t => 
-            (t.Task || t.title || t.task) === (currentTask.Task || currentTask.title || currentTask.task) && 
-            (t.Project || t.project) === (currentTask.Project || currentTask.project)
-          );
-          
-          // Use TaskManager batch update
-          await taskManager.batchUpdate(
-            relatedTasks.map(task => ({ id: task.id, updates: { completed: newStatus } }))
-          );
-          
-          console.log('GanttDeadlines: Updated completion for', relatedTasks.length, 'related tasks');
-        }
-      } else {
-        // Update only this task using TaskManager
-        await taskManager.updateTask(taskId, { completed: newStatus });
-      }
-      
-      console.log('GanttDeadlines: Task completion updated successfully');
-    } catch (error) {
-      console.error('GanttDeadlines: Error updating task completion:', error);
-    } finally {
-      setUpdating(false);
-    }
-  }, [tasks]);
+  // Only show actual deadline instances (no recurring templates)
+  const tasks = useMemo(
+    () => filterDeadlineTasks(Array.isArray(allTasks) ? allTasks : []),
+    [allTasks]
+  );
 
-  // Toggle task urgency using TaskManager
-  const toggleTaskUrgency = useCallback(async (taskId, currentUrgency, shouldUpdateAll = false) => {
-    const newPriority = currentUrgency ? 'Normal' : 'Urgent';
-    
-    try {
-      setUpdating(true);
-      
-      if (shouldUpdateAll) {
-        // Find all related tasks (same Task name and Project)
-        const currentTask = tasks.find(t => t.id === taskId);
-        if (currentTask) {
-          const relatedTasks = tasks.filter(t => 
-            (t.Task || t.title || t.task) === (currentTask.Task || currentTask.title || currentTask.task) && 
-            (t.Project || t.project) === (currentTask.Project || currentTask.project)
-          );
-          
-          // Use TaskManager batch update
-          await taskManager.batchUpdate(
-            relatedTasks.map(task => ({ id: task.id, updates: { priority: newPriority } }))
-          );
-          
-          console.log('GanttDeadlines: Updated urgency for', relatedTasks.length, 'related tasks');
-        }
-      } else {
-        // Update only this task using TaskManager
-        await taskManager.updateTask(taskId, { priority: newPriority });
-      }
-      
-      console.log('GanttDeadlines: Task urgency updated successfully');
-    } catch (error) {
-      console.error('GanttDeadlines: Error updating task urgency:', error);
-    } finally {
-      setUpdating(false);
-    }
-  }, [tasks]);
-
-  // Delete task using TaskManager (legacy - keeping for compatibility)
-  const deleteTask = useCallback(async (taskId) => {
-    try {
-      setUpdating(true);
-      await taskManager.deleteTask(taskId);
-      console.log('GanttDeadlines: Task deleted successfully');
-    } catch (error) {
-      console.error('GanttDeadlines: Error deleting task:', error);
-    } finally {
-      setUpdating(false);
-    }
-  }, []);
-
-  // Action handlers for TaskCard
+  // Action handlers for TaskCard - surface failures to the user (C10)
   const handleToggleComplete = useCallback(async (taskId, currentStatus) => {
     try {
       await taskManager.updateTask(taskId, { completed: !currentStatus });
     } catch (error) {
       console.error('GanttDeadlines: Error toggling completion:', error);
+      alert(`Failed to update task: ${error.message}`);
     }
   }, []);
 
@@ -140,6 +54,7 @@ function GanttDeadlinesPage() {
       await taskManager.updateTask(taskId, { priority: currentUrgency ? 'Normal' : 'Urgent' });
     } catch (error) {
       console.error('GanttDeadlines: Error toggling urgency:', error);
+      alert(`Failed to update task: ${error.message}`);
     }
   }, []);
 
@@ -153,6 +68,7 @@ function GanttDeadlinesPage() {
       setNoteModal({ isOpen: false, task: null });
     } catch (error) {
       console.error('GanttDeadlines: Error saving note:', error);
+      alert(`Failed to save note: ${error.message}`);
     }
   }, []);
 
@@ -169,89 +85,13 @@ function GanttDeadlinesPage() {
     
     try {
       await taskManager.deleteTask(deleteModal.taskId);
-      setDeleteModal({ isOpen: false, taskId: null, taskName: null });
     } catch (error) {
       console.error('GanttDeadlines: Error deleting task:', error);
+      alert(`Failed to delete task: ${error.message}`);
+    } finally {
       setDeleteModal({ isOpen: false, taskId: null, taskName: null });
     }
   }, [deleteModal]);
-
-  // Load tasks from TaskManager
-  const loadTasks = useCallback(async (forceRefresh = false) => {
-    try {
-      setLoading(true);
-      
-      // Initialize TaskManager if not already initialized or if a force refresh is requested
-      if (forceRefresh || !taskManager.isInitialized) {
-        await taskManager.initialize(forceRefresh);
-      }
-      
-      // Get tasks from TaskManager (from memory, no API call)
-      const allTasks = taskManager.getAllTasks();
-      
-      // Filter out recurring templates - only show actual deadline instances
-      const deadlineTasks = filterDeadlineTasks(Array.isArray(allTasks) ? allTasks : []);
-      setTasks(deadlineTasks);
-    } catch (error) {
-      console.error('GanttDeadlines: Error loading tasks:', error);
-      setTasks([]);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  // Load users
-  useEffect(() => {
-    const loadUsers = async () => {
-      try {
-        const usersData = await microsoftDataService.users.getEnterpriseUsers();
-        
-        // Load local assignments from localStorage and merge with users (same as Dashboard)
-        const USER_ASSIGNMENTS_KEY = 'user_assignments';
-        const localAssignments = JSON.parse(localStorage.getItem(USER_ASSIGNMENTS_KEY) || '{}');
-        
-        // Merge enterprise users with local assignments
-        const usersWithAssignments = (Array.isArray(usersData) ? usersData : []).map(user => ({
-          ...user,
-          departments: localAssignments[user.id]?.departments || [],
-          role: localAssignments[user.id]?.role || 'VIEWER'
-        }));
-        
-        setUsers(usersWithAssignments);
-      } catch (err) {
-        console.error('GanttDeadlines: Error loading users:', err);
-        setUsers([]);
-      }
-    };
-    
-    loadUsers();
-    
-    // Listen for department/role changes and refresh users in background
-    const handleUserChange = async () => {
-      console.log('GanttDeadlines: User departments/roles changed, refreshing users...');
-      try {
-        const usersData = await microsoftDataService.users.getEnterpriseUsers();
-        const USER_ASSIGNMENTS_KEY = 'user_assignments';
-        const localAssignments = JSON.parse(localStorage.getItem(USER_ASSIGNMENTS_KEY) || '{}');
-        const usersWithAssignments = (Array.isArray(usersData) ? usersData : []).map(user => ({
-          ...user,
-          departments: localAssignments[user.id]?.departments || [],
-          role: localAssignments[user.id]?.role || 'VIEWER'
-        }));
-        setUsers(usersWithAssignments);
-      } catch (err) {
-        console.error('GanttDeadlines: Error refreshing users:', err);
-      }
-    };
-
-    window.addEventListener('userDepartmentsChanged', handleUserChange);
-    window.addEventListener('userRoleChanged', handleUserChange);
-    
-    return () => {
-      window.removeEventListener('userDepartmentsChanged', handleUserChange);
-      window.removeEventListener('userRoleChanged', handleUserChange);
-    };
-  }, []);
 
   // Load department filter setting
   useEffect(() => {
@@ -279,100 +119,24 @@ function GanttDeadlinesPage() {
     };
   }, []);
 
-  // Get current user's departments
-  const getCurrentUserDepartments = () => {
-    if (!userProfile?.id) return [];
-    const USER_ASSIGNMENTS_KEY = 'user_assignments';
-    const localAssignments = JSON.parse(localStorage.getItem(USER_ASSIGNMENTS_KEY) || '{}');
-    return localAssignments[userProfile.id]?.departments || [];
-  };
-
-  // Filter tasks by department if setting is enabled
-  const getFilteredTasks = (taskList) => {
+  // Filter tasks by department if setting is enabled. Departments come from
+  // the authenticated profile (/api/me), not localStorage (S4).
+  const getFilteredTasks = useCallback((taskList) => {
     if (!departmentFilterEnabled) {
       return taskList;
     }
     
-    const userDepartments = getCurrentUserDepartments();
-    if (!userDepartments || userDepartments.length === 0) {
+    const userDepartments = userProfile?.departments || [];
+    if (userDepartments.length === 0) {
       return taskList; // If user has no departments, show all
     }
 
     return taskList.filter(task => 
       taskBelongsToUserDepartments(task, userDepartments, users)
     );
-  };
-
-  // Load tasks and subscribe to TaskManager events
-  useEffect(() => {
-    loadTasks(true);
-    
-    // Subscribe to TaskManager events for instant updates
-    const unsubscribe = taskManager.subscribe(({ type, tasks: updatedTasks, task, taskId, ...data }) => {
-      if (type === 'refreshed' || type === 'created' || type === 'updated' || type === 'deleted' || type === 'batchCreated' || type === 'batchUpdated' || type === 'batchDeleted') {
-        // Reload tasks from TaskManager
-        const allTasks = taskManager.getAllTasks();
-        const deadlineTasks = filterDeadlineTasks(Array.isArray(allTasks) ? allTasks : []);
-        setTasks(deadlineTasks);
-      }
-      
-      if (type === 'loading') {
-        setLoading(data.isLoading);
-      }
-    });
-    
-    // Also listen to DOM events for cross-component communication
-    const handleTaskDataChanged = (event) => {
-      const { type } = event.detail;
-      if (type === 'refreshed' || type === 'created' || type === 'updated' || type === 'deleted' || type === 'batchCreated' || type === 'batchUpdated' || type === 'batchDeleted') {
-        const allTasks = taskManager.getAllTasks();
-        const deadlineTasks = filterDeadlineTasks(Array.isArray(allTasks) ? allTasks : []);
-        setTasks(deadlineTasks);
-      }
-    };
-    
-    window.addEventListener('taskDataChanged', handleTaskDataChanged);
-    
-    // Legacy event listener for backward compatibility
-    const handleTaskDeleted = () => {
-      loadTasks(true);
-    };
-    window.addEventListener('taskDeleted', handleTaskDeleted);
-    
-    return () => {
-      unsubscribe();
-      window.removeEventListener('taskDataChanged', handleTaskDataChanged);
-      window.removeEventListener('taskDeleted', handleTaskDeleted);
-    };
-  }, [loadTasks]);
-
-  // parseDeadlineDate is now imported from taskHelpers
+  }, [departmentFilterEnabled, userProfile, users]);
 
   const getCalculatedStatus = (task) => getTaskStatus(task);
-
-  const getResponsiblePartyNames = (responsibleParty) => {
-    if (!responsibleParty || !users || users.length === 0) {
-      return String(responsibleParty || '');
-    }
-    
-    // Handle if responsibleParty is an array or object
-    if (typeof responsibleParty !== 'string') {
-      return String(responsibleParty);
-    }
-    
-    const emails = responsibleParty.split(';').map(email => email.trim()).filter(email => email);
-    const names = emails.map(email => {
-      const user = users.find(u => 
-        u.mail === email || 
-        u.userPrincipalName === email || 
-        u.email === email || 
-        u.Email === email
-      );
-      return user ? user.displayName : email;
-    });
-    
-    return names.join(', ');
-  };
 
   const yearTasks = useMemo(() => {
     const filtered = tasks.filter(task => {
@@ -381,7 +145,7 @@ function GanttDeadlinesPage() {
       return deadline.getFullYear() === selectedYear;
     });
     return getFilteredTasks(filtered);
-  }, [tasks, selectedYear, departmentFilterEnabled, userProfile, users]);
+  }, [tasks, selectedYear, getFilteredTasks]);
 
   const monthTasks = useMemo(() => {
     if (selectedMonth === null) return [];
@@ -521,20 +285,6 @@ function GanttDeadlinesPage() {
     return getStatusColor(getGroupStatus(tasks));
   };
 
-  const getMonthStatus = (tasksInMonth) => {
-    let bestStatus = null;
-    let bestPriority = -1;
-    tasksInMonth.forEach(task => {
-      const status = getCalculatedStatus(task);
-      const priority = statusPriority[status] ?? 0;
-      if (priority > bestPriority) {
-        bestPriority = priority;
-        bestStatus = status;
-      }
-    });
-    return bestStatus || 'Active';
-  };
-
   // Get month completion status for background color: 'all-complete', 'in-progress', or 'all-active'
   const getMonthCompletionStatus = (tasksInMonth) => {
     if (!tasksInMonth || tasksInMonth.length === 0) {
@@ -553,28 +303,6 @@ function GanttDeadlinesPage() {
     }
   };
 
-  const getStatusIcon = (status) => {
-    const color = getStatusColor(status);
-    switch (color) {
-      case 'green':
-        return <CheckCircleIcon className="w-5 h-5 text-green-500" />;
-      case 'red':
-        return <ExclamationTriangleIcon className="w-5 h-5 text-red-500" />;
-      case 'orange':
-        return <ClockIcon className="w-5 h-5 text-orange-500" />;
-      case 'blue':
-      default:
-        return <ClockIcon className="w-5 h-5 text-blue-500" />;
-    }
-  };
-
-  const statusBadgeClassMap = {
-    green: 'bg-green-100 text-green-800 dark:bg-green-900/20 dark:text-green-400',
-    red: 'bg-red-100 text-red-800 dark:bg-red-900/20 dark:text-red-400',
-    orange: 'bg-orange-100 text-orange-800 dark:bg-orange-900/20 dark:text-orange-300',
-    blue: 'bg-blue-100 text-blue-800 dark:bg-blue-900/20 dark:text-blue-400'
-  };
-
   const statusDotClassMap = {
     green: 'bg-green-500 dark:bg-green-400 ring-green-200 dark:ring-green-800',
     red: 'bg-red-500 dark:bg-red-400 ring-red-200 dark:ring-red-800',
@@ -583,7 +311,6 @@ function GanttDeadlinesPage() {
     yellow: 'bg-yellow-500 dark:bg-yellow-400 ring-yellow-200 dark:ring-yellow-800' // For mixed statuses
   };
 
-  const getStatusBadgeClass = (status) => statusBadgeClassMap[getStatusColor(status)] || statusBadgeClassMap.blue;
   const getTaskDotClass = (status) => statusDotClassMap[getStatusColor(status)] || statusDotClassMap.blue;
 
   const getPriorityRing = (task) => {
@@ -628,23 +355,8 @@ function GanttDeadlinesPage() {
     );
   }
 
-  const selectedStatus = selectedTask ? getCalculatedStatus(selectedTask) : null;
-
   return (
     <div className="min-h-screen bg-gray-50 dark:bg-gray-900 relative">
-      {/* Updating Overlay */}
-      {updating && (
-        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50">
-          <div className="bg-white dark:bg-gray-800 rounded-xl shadow-2xl p-8 flex flex-col items-center gap-4 border border-gray-200 dark:border-gray-700">
-            <div className="animate-spin rounded-full h-16 w-16 border-4 border-blue-200 border-t-blue-600"></div>
-            <div className="text-center">
-              <p className="text-lg font-semibold text-gray-900 dark:text-white">Updating...</p>
-              <p className="text-sm text-gray-600 dark:text-gray-400 mt-1">Syncing with database</p>
-            </div>
-          </div>
-        </div>
-      )}
-      
       <div className="max-w-7xl mx-auto p-6 space-y-6">
         {/* Header */}
         <div className="flex justify-between items-center">
@@ -955,126 +667,14 @@ function GanttDeadlinesPage() {
               </div>
               
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-                {getTasksForMonth(selectedMonth).map((task) => {
-                  const status = getCalculatedStatus(task);
-                  const deadline = parseDeadlineDate(getTaskDeadline(task));
-                  const responsibleNames = getResponsiblePartyNames(task.ResponsibleParty);
-                  
-                  return (
-                    <div
-                      key={task.id}
-                      onClick={() => handleTaskClick(task)}
-                      className={`group p-4 rounded-xl backdrop-blur-sm border transition-all duration-200 hover:scale-[1.02] hover:shadow-lg cursor-pointer ${
-                        status === 'Active'
-                          ? 'bg-blue-50/60 dark:bg-blue-950/20 border-blue-200/50 dark:border-blue-800/30 hover:bg-blue-50/80 dark:hover:bg-blue-950/30'
-                          : status === 'Due Soon'
-                          ? 'bg-orange-50/60 dark:bg-orange-950/20 border-orange-200/50 dark:border-orange-800/30 hover:bg-orange-50/80 dark:hover:bg-orange-950/30'
-                          : status === 'Overdue'
-                          ? 'bg-red-50/60 dark:bg-red-950/20 border-red-200/50 dark:border-red-800/30 hover:bg-red-50/80 dark:hover:bg-red-950/30'
-                          : status === 'Completed'
-                          ? 'bg-green-50/60 dark:bg-green-950/20 border-green-200/50 dark:border-green-800/30 hover:bg-green-50/80 dark:hover:bg-green-950/30'
-                          : 'bg-gray-50/60 dark:bg-gray-950/20 border-gray-200/50 dark:border-gray-800/30 hover:bg-gray-50/80 dark:hover:bg-gray-950/30'
-                      } ${task.Priority === 'Urgent' ? 'ring-2 ring-orange-200/50 dark:ring-orange-800/30' : ''}`}
-                    >
-                      <div className="flex items-center justify-between mb-3">
-                        <div className="flex items-center gap-2">
-                          {getStatusIcon(status)}
-                          <h3 className="text-sm font-semibold text-gray-900 dark:text-white group-hover:text-blue-900 dark:group-hover:text-blue-100 transition-colors">
-                            {task.task || task.Task || 'Untitled Task'}
-                          </h3>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <span className={`px-2 py-1 text-xs font-medium rounded-full ${getStatusBadgeClass(status)}`}>
-                            {status}
-                          </span>
-                          {task.Priority === 'Urgent' && (
-                            <span className="px-2 py-1 text-xs font-medium rounded-full bg-gradient-to-r from-orange-500 to-orange-600 text-white shadow-md">
-                              Urgent
-                            </span>
-                          )}
-                        </div>
-                      </div>
-
-                      <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-4">
-                          <div className="flex items-center gap-2">
-                            <div className="p-1 bg-blue-100 dark:bg-blue-900/30 rounded-md">
-                              <FolderIcon className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
-                            </div>
-                            <span className="text-xs text-gray-600 dark:text-gray-400">{task.Project || 'No Project'}</span>
-                          </div>
-                          
-                          <div className="flex items-center gap-2">
-                            <div className="p-1 bg-green-100 dark:bg-green-900/30 rounded-md">
-                              <UserIcon className="w-3.5 h-3.5 text-green-600 dark:text-green-400" />
-                            </div>
-                            <span className="text-xs text-gray-600 dark:text-gray-400">{responsibleNames}</span>
-                          </div>
-                        </div>
-
-                        <div className={`flex items-center gap-2 px-3 py-2 rounded-lg backdrop-blur-sm border ${
-                          status === 'Active'
-                            ? 'bg-blue-100/40 dark:bg-blue-900/20 border-blue-200/30 dark:border-blue-800/20'
-                            : status === 'Due Soon'
-                            ? 'bg-orange-100/40 dark:bg-orange-900/20 border-orange-200/30 dark:border-orange-800/20'
-                            : status === 'Overdue'
-                            ? 'bg-red-100/40 dark:bg-red-900/20 border-red-200/30 dark:border-red-800/20'
-                            : status === 'Completed'
-                            ? 'bg-green-100/40 dark:bg-green-900/20 border-green-200/30 dark:border-green-800/20'
-                            : 'bg-gray-100/40 dark:bg-gray-900/20 border-gray-200/30 dark:border-gray-800/20'
-                        }`}>
-                          <div className={`p-1 rounded-md ${
-                            status === 'Active' 
-                              ? 'bg-blue-200/60 dark:bg-blue-800/40' 
-                              : status === 'Due Soon'
-                              ? 'bg-orange-200/60 dark:bg-orange-800/40'
-                              : status === 'Overdue'
-                              ? 'bg-red-200/60 dark:bg-red-800/40'
-                              : status === 'Completed'
-                              ? 'bg-green-200/60 dark:bg-green-800/40'
-                              : 'bg-gray-200/60 dark:bg-gray-800/40'
-                          }`}>
-                            <CalendarDaysIcon className={`w-3.5 h-3.5 ${
-                              status === 'Active' 
-                                ? 'text-blue-700 dark:text-blue-300' 
-                                : status === 'Due Soon'
-                                ? 'text-orange-700 dark:text-orange-300'
-                                : status === 'Overdue'
-                                ? 'text-red-700 dark:text-red-300'
-                                : status === 'Completed'
-                                ? 'text-green-700 dark:text-green-300'
-                                : 'text-gray-700 dark:text-gray-300'
-                            }`} />
-                          </div>
-                          <div className="text-center">
-                            <div className="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wide font-medium">Due</div>
-                            <div className={`text-sm font-bold ${
-                              status === 'Active' 
-                                ? 'text-blue-900 dark:text-blue-100' 
-                                : status === 'Due Soon'
-                                ? 'text-orange-900 dark:text-orange-100'
-                                : status === 'Overdue'
-                                ? 'text-red-900 dark:text-red-100'
-                                : status === 'Completed'
-                                ? 'text-green-900 dark:text-green-100'
-                                : 'text-gray-900 dark:text-gray-100'
-                            }`}>
-                              {deadline ? format(deadline, 'MMM dd, yyyy') : 'No date'}
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-
-                      {task.Notes && (
-                        <div className="mt-3 pt-3 border-t border-gray-200/50 dark:border-gray-600/30">
-                          <p className="text-xs text-gray-600 dark:text-gray-400 italic">
-                            {task.Notes}
-                          </p>
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
+                {getTasksForMonth(selectedMonth).map((task) => (
+                  <GanttTaskListItem
+                    key={task.id}
+                    task={task}
+                    users={users}
+                    onClick={() => handleTaskClick(task)}
+                  />
+                ))}
               </div>
             </div>
           )}
@@ -1225,127 +825,15 @@ function GanttDeadlinesPage() {
                   </div>
                 ) : (
                   <div className="space-y-4">
-                    {monthTasks.map((task, index) => {
-                      const status = getCalculatedStatus(task);
-                      const deadline = parseDeadlineDate(getTaskDeadline(task));
-                      const responsibleNames = getResponsiblePartyNames(task.ResponsibleParty);
-                      
-                      return (
-                        <div
-                          key={task.id}
-                          onClick={() => handleTaskClick(task)}
-                          className={`group p-4 rounded-xl backdrop-blur-sm border transition-all duration-200 hover:scale-[1.02] hover:shadow-lg cursor-pointer ${
-                            status === 'Active'
-                              ? 'bg-blue-50/60 dark:bg-blue-950/20 border-blue-200/50 dark:border-blue-800/30 hover:bg-blue-50/80 dark:hover:bg-blue-950/30'
-                              : status === 'Due Soon'
-                              ? 'bg-orange-50/60 dark:bg-orange-950/20 border-orange-200/50 dark:border-orange-800/30 hover:bg-orange-50/80 dark:hover:bg-orange-950/30'
-                              : status === 'Overdue'
-                              ? 'bg-red-50/60 dark:bg-red-950/20 border-red-200/50 dark:border-red-800/30 hover:bg-red-50/80 dark:hover:bg-red-950/30'
-                              : status === 'Completed'
-                              ? 'bg-green-50/60 dark:bg-green-950/20 border-green-200/50 dark:border-green-800/30 hover:bg-green-50/80 dark:hover:bg-green-950/30'
-                              : 'bg-gray-50/60 dark:bg-gray-950/20 border-gray-200/50 dark:border-gray-800/30 hover:bg-gray-50/80 dark:hover:bg-gray-950/30'
-                          } ${task.Priority === 'Urgent' ? 'ring-2 ring-orange-200/50 dark:ring-orange-800/30' : ''}`}
-                          style={{ animationDelay: `${index * 30}ms` }}
-                        >
-                          <div className="flex items-center justify-between mb-3">
-                            <div className="flex items-center gap-2">
-                              {getStatusIcon(status)}
-                              <h3 className="text-sm font-semibold text-gray-900 dark:text-white group-hover:text-blue-900 dark:group-hover:text-blue-100 transition-colors">
-                                {task.task || task.Task || 'Untitled Task'}
-                              </h3>
-                            </div>
-                            <div className="flex items-center gap-2">
-                              <span className={`px-2 py-1 text-xs font-medium rounded-full ${getStatusBadgeClass(status)}`}>
-                                {status}
-                              </span>
-                              {task.Priority === 'Urgent' && (
-                                <span className="px-2 py-1 text-xs font-medium rounded-full bg-gradient-to-r from-orange-500 to-orange-600 text-white shadow-md">
-                                  Urgent
-                                </span>
-                              )}
-                            </div>
-                          </div>
-
-                          <div className="flex items-center justify-between">
-                            <div className="flex items-center gap-4">
-                              <div className="flex items-center gap-2">
-                                <div className="p-1 bg-blue-100 dark:bg-blue-900/30 rounded-md">
-                                  <FolderIcon className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
-                                </div>
-                                <span className="text-xs text-gray-600 dark:text-gray-400">{task.Project || 'No Project'}</span>
-                              </div>
-                              
-                              <div className="flex items-center gap-2">
-                                <div className="p-1 bg-green-100 dark:bg-green-900/30 rounded-md">
-                                  <UserIcon className="w-3.5 h-3.5 text-green-600 dark:text-green-400" />
-                                </div>
-                                <span className="text-xs text-gray-600 dark:text-gray-400">{responsibleNames}</span>
-                              </div>
-                            </div>
-
-                            <div className={`flex items-center gap-2 px-3 py-2 rounded-lg backdrop-blur-sm border ${
-                              status === 'Active'
-                                ? 'bg-blue-100/40 dark:bg-blue-900/20 border-blue-200/30 dark:border-blue-800/20'
-                                : status === 'Due Soon'
-                                ? 'bg-orange-100/40 dark:bg-orange-900/20 border-orange-200/30 dark:border-orange-800/20'
-                                : status === 'Overdue'
-                                ? 'bg-red-100/40 dark:bg-red-900/20 border-red-200/30 dark:border-red-800/20'
-                                : status === 'Completed'
-                                ? 'bg-green-100/40 dark:bg-green-900/20 border-green-200/30 dark:border-green-800/20'
-                                : 'bg-gray-100/40 dark:bg-gray-900/20 border-gray-200/30 dark:border-gray-800/20'
-                            }`}>
-                              <div className={`p-1 rounded-md ${
-                                status === 'Active'
-                                  ? 'bg-blue-200/60 dark:bg-blue-800/40'
-                                  : status === 'Due Soon'
-                                  ? 'bg-orange-200/60 dark:bg-orange-800/40'
-                                  : status === 'Overdue'
-                                  ? 'bg-red-200/60 dark:bg-red-800/40'
-                                  : status === 'Completed'
-                                  ? 'bg-green-200/60 dark:bg-green-800/40'
-                                  : 'bg-gray-200/60 dark:bg-gray-800/40'
-                              }`}>
-                                <CalendarDaysIcon className={`w-3.5 h-3.5 ${
-                                  status === 'Active'
-                                    ? 'text-blue-700 dark:text-blue-300'
-                                    : status === 'Due Soon'
-                                    ? 'text-orange-700 dark:text-orange-300'
-                                    : status === 'Overdue'
-                                    ? 'text-red-700 dark:text-red-300'
-                                    : status === 'Completed'
-                                    ? 'text-green-700 dark:text-green-300'
-                                    : 'text-gray-700 dark:text-gray-300'
-                                }`} />
-                              </div>
-                              <div className="text-center">
-                                <div className="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wide font-medium">Due</div>
-                                <div className={`text-sm font-bold ${
-                                  status === 'Active'
-                                    ? 'text-blue-900 dark:text-blue-100'
-                                    : status === 'Due Soon'
-                                    ? 'text-orange-900 dark:text-orange-100'
-                                    : status === 'Overdue'
-                                    ? 'text-red-900 dark:text-red-100'
-                                    : status === 'Completed'
-                                    ? 'text-green-900 dark:text-green-100'
-                                    : 'text-gray-900 dark:text-gray-100'
-                                }`}>
-                                  {deadline ? format(deadline, 'MMM dd, yyyy') : 'No date'}
-                                </div>
-                              </div>
-                            </div>
-                          </div>
-
-                          {task.Notes && (
-                            <div className="mt-3 pt-3 border-t border-gray-200/50 dark:border-gray-600/30">
-                              <p className="text-xs text-gray-600 dark:text-gray-400 italic">
-                                {task.Notes}
-                              </p>
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })}
+                    {monthTasks.map((task, index) => (
+                      <GanttTaskListItem
+                        key={task.id}
+                        task={task}
+                        users={users}
+                        onClick={() => handleTaskClick(task)}
+                        style={{ animationDelay: `${index * 30}ms` }}
+                      />
+                    ))}
                   </div>
                 )}
               </div>

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useMemo } from 'react';
 import { format, startOfYear, endOfYear, isWithinInterval } from 'date-fns';
 import {
   DocumentArrowDownIcon,
@@ -6,13 +6,11 @@ import {
   FunnelIcon,
   CalendarDaysIcon,
   BuildingOfficeIcon,
-  UserIcon,
-  FolderIcon,
-  XMarkIcon
+  UserIcon
 } from '@heroicons/react/24/outline';
-import { taskManager } from './services/taskManager';
-import { microsoftDataService } from './microsoftDataService';
-import { filterDeadlineTasks, getTaskDeadline, parseDeadlineDate, isTaskCompleted, getTaskPriority, getTaskProject, getTaskTitle, getTaskResponsibleParty } from './utils/taskHelpers';
+import { filterDeadlineTasks, getTaskDeadline, parseDeadlineDate, isTaskCompleted, getTaskProject, getTaskTitle, getTaskResponsibleParty, getTaskDepartments } from './utils/taskHelpers';
+import { useTasks } from './hooks/useTasks';
+import { useUsers } from './hooks/useUsers';
 
 // Department constants (matching Dashboard)
 const DEPARTMENTS = {
@@ -36,9 +34,14 @@ const REPORT_TYPES = {
 };
 
 function ReportsPage() {
-  const [tasks, setTasks] = useState([]);
-  const [users, setUsers] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const { tasks: allTasks, isLoading: loading } = useTasks();
+  const { users } = useUsers();
+
+  // Only show actual deadline instances (no recurring templates)
+  const tasks = useMemo(
+    () => filterDeadlineTasks(Array.isArray(allTasks) ? allTasks : []),
+    [allTasks]
+  );
   
   // Report configuration
   const [reportType, setReportType] = useState(REPORT_TYPES.DEADLINES);
@@ -51,92 +54,6 @@ function ReportsPage() {
   
   // UI state
   const [showPreview, setShowPreview] = useState(false);
-
-  // Load tasks from TaskManager
-  const loadTasks = useCallback(async (forceRefresh = false) => {
-    try {
-      setLoading(true);
-      
-      // Initialize TaskManager if not already initialized or if a force refresh is requested
-      if (forceRefresh || !taskManager.isInitialized) {
-        await taskManager.initialize(forceRefresh);
-      }
-      
-      // Get tasks from TaskManager (from memory, no API call)
-      const allTasks = taskManager.getAllTasks();
-      
-      // Filter out recurring templates - only show actual deadline instances
-      const deadlineTasks = filterDeadlineTasks(Array.isArray(allTasks) ? allTasks : []);
-      setTasks(deadlineTasks);
-    } catch (error) {
-      console.error('ReportsPage: Error loading tasks:', error);
-      setTasks([]);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  // Load users
-  useEffect(() => {
-    const loadUsers = async () => {
-      try {
-        const usersData = await microsoftDataService.users.getEnterpriseUsers();
-        
-        // Merge enterprise users with local assignments (same as Dashboard/App.js)
-        const USER_ASSIGNMENTS_KEY = 'user_assignments';
-        const localAssignments = JSON.parse(localStorage.getItem(USER_ASSIGNMENTS_KEY) || '{}');
-        
-        const usersWithAssignments = (Array.isArray(usersData) ? usersData : []).map(user => ({
-          ...user,
-          departments: localAssignments[user.id]?.departments || [],
-          role: localAssignments[user.id]?.role || 'VIEWER'
-        }));
-        
-        setUsers(usersWithAssignments);
-      } catch (err) {
-        console.error('ReportsPage: Error loading users:', err);
-        setUsers([]);
-      }
-    };
-    
-    loadUsers();
-  }, []);
-
-  // Load tasks and subscribe to TaskManager events
-  useEffect(() => {
-    loadTasks(true);
-    
-    // Subscribe to TaskManager events for instant updates
-    const unsubscribe = taskManager.subscribe(({ type, tasks: updatedTasks, task, taskId, ...data }) => {
-      if (type === 'refreshed' || type === 'created' || type === 'updated' || type === 'deleted' || type === 'batchCreated' || type === 'batchUpdated' || type === 'batchDeleted') {
-        // Reload tasks from TaskManager
-        const allTasks = taskManager.getAllTasks();
-        const deadlineTasks = filterDeadlineTasks(Array.isArray(allTasks) ? allTasks : []);
-        setTasks(deadlineTasks);
-      }
-      
-      if (type === 'loading') {
-        setLoading(data.isLoading);
-      }
-    });
-    
-    // Also listen to DOM events for cross-component communication
-    const handleTaskDataChanged = (event) => {
-      const { type } = event.detail;
-      if (type === 'refreshed' || type === 'created' || type === 'updated' || type === 'deleted' || type === 'batchCreated' || type === 'batchUpdated' || type === 'batchDeleted') {
-        const allTasks = taskManager.getAllTasks();
-        const deadlineTasks = filterDeadlineTasks(Array.isArray(allTasks) ? allTasks : []);
-        setTasks(deadlineTasks);
-      }
-    };
-    
-    window.addEventListener('taskDataChanged', handleTaskDataChanged);
-    
-    return () => {
-      unsubscribe();
-      window.removeEventListener('taskDataChanged', handleTaskDataChanged);
-    };
-  }, [loadTasks]);
 
   // Get available projects
   const availableProjects = useMemo(() => {
@@ -217,21 +134,10 @@ function ReportsPage() {
     return filtered;
   }, [tasks, selectedYear, selectedProjects, selectedUsers, users]);
 
-  // Calculate department progress
+  // Calculate department progress (A2: shared department resolution; user
+  // assignments come from the API via useUsers, not localStorage)
   const getDepartmentProgress = (tasksForReport) => {
     const progress = {};
-    
-    // Load user assignments from localStorage
-    const USER_ASSIGNMENTS_KEY = 'user_assignments';
-    let localAssignments = {};
-    try {
-      const storedAssignments = localStorage.getItem(USER_ASSIGNMENTS_KEY);
-      if (storedAssignments) {
-        localAssignments = JSON.parse(storedAssignments);
-      }
-    } catch (error) {
-      console.error('ReportsPage: Error parsing localStorage assignments:', error);
-    }
     
     // Initialize all departments
     Object.values(DEPARTMENTS).forEach(dept => {
@@ -248,56 +154,7 @@ function ReportsPage() {
     }
 
     tasksForReport.forEach(task => {
-      const responsibleParty = getTaskResponsibleParty(task);
-      
-      // Find all users assigned to this task
-      const assignedUsers = users.filter(user => {
-        const userEmail = user.email || user.Email || user.mail || user.userPrincipalName || '';
-        const userDisplayName = user.displayName || user.DisplayName || '';
-        
-        let responsiblePartyStr = '';
-        if (typeof responsibleParty === 'string') {
-          responsiblePartyStr = responsibleParty;
-        } else if (Array.isArray(responsibleParty)) {
-          responsiblePartyStr = responsibleParty.map(item => {
-            if (typeof item === 'object' && item.LookupValue) {
-              return item.LookupValue;
-            }
-            if (typeof item === 'object' && item.Email) {
-              return item.Email;
-            }
-            return String(item);
-          }).join('; ');
-        } else if (responsibleParty && typeof responsibleParty === 'object') {
-          responsiblePartyStr = responsibleParty.LookupValue || responsibleParty.Email || String(responsibleParty);
-        } else {
-          responsiblePartyStr = String(responsibleParty || '');
-        }
-        
-        return responsiblePartyStr && responsiblePartyStr.trim() !== '' && 
-               (responsiblePartyStr.includes(userEmail) || responsiblePartyStr.includes(userDisplayName));
-      });
-      
-      // Collect all unique departments from all assigned users
-      const taskDepartments = new Set();
-      assignedUsers.forEach(assignedUser => {
-        // Check Microsoft Graph department field
-        if (assignedUser.department) {
-          const deptLower = assignedUser.department.toLowerCase();
-          if (deptLower.includes('development')) taskDepartments.add('development');
-          if (deptLower.includes('accounting')) taskDepartments.add('accounting');
-          if (deptLower.includes('compliance')) taskDepartments.add('compliance');
-          if (deptLower.includes('management')) taskDepartments.add('management');
-        }
-        // Also check localStorage assignments (normalize to lowercase)
-        const userDepartments = assignedUser.departments || [];
-        userDepartments.forEach(department => {
-          if (department) {
-            taskDepartments.add(department.toLowerCase());
-          }
-        });
-      });
-      
+      const taskDepartments = getTaskDepartments(task, users);
       const isCompleted = isTaskCompleted(task);
       
       taskDepartments.forEach(department => {
@@ -319,54 +176,55 @@ function ReportsPage() {
     return Object.values(progress);
   };
 
-  // Calculate user progress
+  // Calculate user progress (C10: skip users without an email and never
+  // match on an empty string)
   const getUserProgress = (tasksForReport) => {
-    return users.map(user => {
-      const userEmail = user.mail || user.userPrincipalName || user.email;
-      const userDisplayName = user.displayName || user.DisplayName || userEmail;
-      
-      const userTasks = tasksForReport.filter(task => {
-        const responsibleParty = getTaskResponsibleParty(task);
-        if (!responsibleParty) return false;
-        
-        let responsiblePartyStr = '';
-        if (typeof responsibleParty === 'string') {
-          responsiblePartyStr = responsibleParty;
-        } else if (Array.isArray(responsibleParty)) {
-          responsiblePartyStr = responsibleParty.map(item => {
-            if (typeof item === 'object' && item.LookupValue) return item.LookupValue;
-            if (typeof item === 'object' && item.Email) return item.Email;
-            return String(item);
-          }).join('; ');
-        } else {
-          responsiblePartyStr = String(responsibleParty || '');
-        }
-        
-        if (responsiblePartyStr.toLowerCase().includes(userEmail.toLowerCase())) {
-          return true;
-        }
-        if (responsiblePartyStr.toLowerCase().includes(userDisplayName.toLowerCase())) {
-          return true;
-        }
-        const initials = userDisplayName.split(' ').map(n => n.charAt(0)).join('');
-        const initialsWithName = `${initials} ${userDisplayName}`.toLowerCase();
-        if (responsiblePartyStr.toLowerCase().includes(initialsWithName)) {
-          return true;
-        }
-        
-        return false;
-      });
+    return users
+      .filter(user => (user.mail || user.userPrincipalName || user.email || user.Email || '').trim() !== '')
+      .map(user => {
+        const userEmail = (user.mail || user.userPrincipalName || user.email || user.Email).trim();
+        const userDisplayName = (user.displayName || user.DisplayName || userEmail).trim();
 
-      const completedUserTasks = userTasks.filter(isTaskCompleted);
-      
-      return {
-        name: user.displayName || user.DisplayName || userEmail,
-        email: userEmail,
-        total: userTasks.length,
-        completed: completedUserTasks.length,
-        percentage: userTasks.length > 0 ? Math.round((completedUserTasks.length / userTasks.length) * 100) : 0
-      };
-    }).filter(user => user.total > 0); // Only show users with tasks
+        const userTasks = tasksForReport.filter(task => {
+          const responsibleParty = getTaskResponsibleParty(task);
+          if (!responsibleParty) return false;
+
+          let responsiblePartyStr = '';
+          if (typeof responsibleParty === 'string') {
+            responsiblePartyStr = responsibleParty;
+          } else if (Array.isArray(responsibleParty)) {
+            responsiblePartyStr = responsibleParty.map(item => {
+              if (typeof item === 'object' && item.LookupValue) return item.LookupValue;
+              if (typeof item === 'object' && item.Email) return item.Email;
+              return String(item);
+            }).join('; ');
+          } else {
+            responsiblePartyStr = String(responsibleParty || '');
+          }
+
+          const responsibleLower = responsiblePartyStr.toLowerCase();
+          if (!responsibleLower.trim()) return false;
+
+          if (responsibleLower.includes(userEmail.toLowerCase())) {
+            return true;
+          }
+          if (userDisplayName && responsibleLower.includes(userDisplayName.toLowerCase())) {
+            return true;
+          }
+
+          return false;
+        });
+
+        const completedUserTasks = userTasks.filter(isTaskCompleted);
+
+        return {
+          name: userDisplayName,
+          email: userEmail,
+          total: userTasks.length,
+          completed: completedUserTasks.length,
+          percentage: userTasks.length > 0 ? Math.round((completedUserTasks.length / userTasks.length) * 100) : 0
+        };
+      }).filter(user => user.total > 0); // Only show users with tasks
   };
 
   // Get tasks for department/user reports

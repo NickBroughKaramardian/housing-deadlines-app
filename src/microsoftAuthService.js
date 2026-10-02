@@ -1,12 +1,12 @@
 import { microsoftDataService } from './microsoftDataService';
 import { login, logout, getCurrentUser, getAccessToken, handleRedirectPromise } from './msalService';
+import { getMe } from './services/usersApi';
 
-// User roles
+// User roles (must match the backend /api/me contract)
 export const ROLES = {
-  DEVELOPER: 'DEVELOPER',
-  OWNER: 'OWNER',
   ADMIN: 'ADMIN',
-  EDITOR: 'EDITOR',
+  MANAGER: 'MANAGER',
+  MEMBER: 'MEMBER',
   VIEWER: 'VIEWER'
 };
 
@@ -24,13 +24,12 @@ export const DEPARTMENT_NAMES = Object.values(DEPARTMENTS);
 export const hasPermission = (userRole, requiredRole) => {
   const roleHierarchy = {
     [ROLES.VIEWER]: 0,
-    [ROLES.EDITOR]: 1,
-    [ROLES.ADMIN]: 2,
-    [ROLES.OWNER]: 3,
-    [ROLES.DEVELOPER]: 4
+    [ROLES.MEMBER]: 1,
+    [ROLES.MANAGER]: 2,
+    [ROLES.ADMIN]: 3
   };
   
-  return roleHierarchy[userRole] >= roleHierarchy[requiredRole];
+  return (roleHierarchy[userRole] ?? -1) >= (roleHierarchy[requiredRole] ?? 0);
 };
 
 // Department detection from responsible party
@@ -56,7 +55,7 @@ export const getDepartmentFromResponsibleParty = (responsibleParty, departmentMa
   }
   
   // Check department keywords
-  for (const [key, dept] of Object.entries(DEPARTMENTS)) {
+  for (const dept of Object.values(DEPARTMENTS)) {
     if (party.includes(dept.toLowerCase())) {
       return dept;
     }
@@ -104,6 +103,46 @@ export const inviteUser = async (email, role, departments = []) => {
   }
 };
 
+// In-memory session cache for the /api/me profile (S3). Never persisted;
+// cleared on sign-out.
+let cachedProfile = null;
+
+/**
+ * Build the user profile for a signed-in MSAL account.
+ * Role and departments come from GET /api/me. If /api/me fails (e.g. backend
+ * not deployed yet), fall back to the least-privileged useful role (MEMBER)
+ * and log a warning. NEVER falls back to ADMIN.
+ */
+const buildUserProfile = async (account) => {
+  const accountId = account.localAccountId || account.username;
+  if (cachedProfile && cachedProfile.id === accountId) {
+    return cachedProfile;
+  }
+
+  let me = null;
+  try {
+    me = await getMe();
+  } catch (error) {
+    console.warn(
+      'AuthService: GET /api/me failed - falling back to MEMBER role (no departments).',
+      error
+    );
+  }
+
+  cachedProfile = {
+    id: accountId,
+    displayName: me?.name || account.name || account.username,
+    email: me?.email || account.username,
+    role: me?.role || ROLES.MEMBER,
+    departments: Array.isArray(me?.departments) ? me.departments : [],
+    isActive: true,
+    lastLogin: new Date().toISOString(),
+    organizationId: 'microsoft-365'
+  };
+
+  return cachedProfile;
+};
+
 // Main authentication service
 export const authService = {
   // Initialize authentication
@@ -120,27 +159,10 @@ export const authService = {
   // Sign in user
   signIn: async () => {
     try {
-      console.log('AuthService: Starting sign in...');
       const account = await login();
-      console.log('AuthService: Login successful, account:', account);
       
       if (account) {
-        // For now, return a mock user without SharePoint integration
-        // This will allow the app to work while we debug SharePoint issues
-        const mockUser = {
-          id: account.localAccountId || '1',
-          displayName: account.name || account.username || 'Test User',
-          email: account.username || 'test@example.com',
-          role: 'ADMIN',
-          departments: ['Development'],
-          isActive: true,
-          createdDate: new Date().toISOString(),
-          lastLogin: new Date().toISOString(),
-          organizationId: 'microsoft-365'
-        };
-        
-        console.log('AuthService: Returning mock user:', mockUser);
-        return mockUser;
+        return await buildUserProfile(account);
       }
       
       throw new Error('Login failed - no account returned');
@@ -153,9 +175,8 @@ export const authService = {
   // Sign out user
   signOut: async () => {
     try {
-      console.log('AuthService: Starting sign out...');
+      cachedProfile = null;
       await logout();
-      console.log('AuthService: Sign out successful');
     } catch (error) {
       console.error('AuthService: Sign out error:', error);
       throw error;
@@ -177,28 +198,12 @@ export const authService = {
   // Get current user
   getCurrentUser: async () => {
     try {
-      console.log('AuthService: Getting current user...');
       const account = await getCurrentUser();
-      console.log('AuthService: Current account:', account);
       
       if (account) {
-        const mockUser = {
-          id: account.localAccountId || '1',
-          displayName: account.name || account.username || 'Test User',
-          email: account.username || 'test@example.com',
-          role: 'ADMIN',
-          departments: ['Development'],
-          isActive: true,
-          createdDate: new Date().toISOString(),
-          lastLogin: new Date().toISOString(),
-          organizationId: 'microsoft-365'
-        };
-        
-        console.log('AuthService: Returning current user:', mockUser);
-        return mockUser;
+        return await buildUserProfile(account);
       }
       
-      console.log('AuthService: No current user found');
       return null;
     } catch (error) {
       console.error('AuthService: Error getting current user:', error);

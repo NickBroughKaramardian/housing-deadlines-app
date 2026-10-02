@@ -62,6 +62,15 @@ export function parseDeadlineDate(dateStr) {
 }
 
 /**
+ * Format a deadline date string for display (e.g. "Jan 05, 2026")
+ */
+export function formatDisplayDate(dateStr) {
+  const date = parseDeadlineDate(dateStr);
+  if (!date) return '';
+  return date.toLocaleDateString('en-US', { month: 'short', day: '2-digit', year: 'numeric' });
+}
+
+/**
  * Check if a task is completed
  */
 export function isTaskCompleted(task) {
@@ -102,6 +111,82 @@ export function getTaskTitle(task) {
  */
 export function getTaskResponsibleParty(task) {
   return task.responsibleParty || task.ResponsibleParty || null;
+}
+
+/**
+ * Convert a responsibleParty value (string, array, or SharePoint lookup object)
+ * to a display string.
+ */
+export function responsiblePartyToString(responsibleParty) {
+  if (!responsibleParty) return '';
+  if (typeof responsibleParty === 'string') return responsibleParty;
+  if (Array.isArray(responsibleParty)) {
+    return responsibleParty.map(item => {
+      if (item && typeof item === 'object') {
+        return item.LookupValue || item.Email || String(item);
+      }
+      return String(item);
+    }).join('; ');
+  }
+  if (typeof responsibleParty === 'object') {
+    return responsibleParty.LookupValue || responsibleParty.Email || String(responsibleParty);
+  }
+  return String(responsibleParty);
+}
+
+/**
+ * Resolve a responsibleParty value to display names using the users list.
+ * Emails/names are matched case-insensitively; unmatched entries are kept as-is.
+ */
+export function getResponsiblePartyNames(responsibleParty, users = []) {
+  const str = responsiblePartyToString(responsibleParty);
+  if (!str || !str.trim()) return '';
+
+  const parts = str.split(/[,;]/).map(p => p.trim()).filter(Boolean);
+  const names = parts.map(part => {
+    const partLower = part.toLowerCase();
+    const user = users.find(u => {
+      const email = (u.email || u.Email || u.mail || u.userPrincipalName || '').toLowerCase();
+      const name = (u.displayName || u.DisplayName || '').toLowerCase();
+      return (email && email === partLower) || (name && name === partLower);
+    });
+    return user ? (user.displayName || user.DisplayName || part) : part;
+  });
+  return names.join(', ');
+}
+
+const KNOWN_DEPARTMENTS = ['development', 'accounting', 'compliance', 'management'];
+
+/**
+ * Resolve the set of departments (lowercase) a task belongs to, based on the
+ * users assigned as responsible party. Considers both the Microsoft Graph
+ * `department` field and the app-level `departments` assignments.
+ */
+export function getTaskDepartments(task, users = []) {
+  const departments = new Set();
+  const str = responsiblePartyToString(getTaskResponsibleParty(task));
+  if (!str || !str.trim()) return departments;
+
+  users.forEach(user => {
+    const userEmail = user.email || user.Email || user.mail || user.userPrincipalName || '';
+    const userDisplayName = user.displayName || user.DisplayName || '';
+    const matches =
+      (userEmail && str.includes(userEmail)) ||
+      (userDisplayName && str.includes(userDisplayName));
+    if (!matches) return;
+
+    if (user.department) {
+      const deptLower = user.department.toLowerCase();
+      KNOWN_DEPARTMENTS.forEach(dept => {
+        if (deptLower.includes(dept)) departments.add(dept);
+      });
+    }
+    (user.departments || []).forEach(dept => {
+      if (dept) departments.add(String(dept).toLowerCase());
+    });
+  });
+
+  return departments;
 }
 
 const MS_IN_DAY = 1000 * 60 * 60 * 24;
@@ -167,57 +252,13 @@ export function taskBelongsToUserDepartments(task, userDepartments, users) {
     return true;
   }
 
-  // Get responsible party from task
-  const responsibleParty = getTaskResponsibleParty(task);
-  if (!responsibleParty) {
-    // If no responsible party, don't filter it out (show it)
-    return true;
-  }
-
-  // Convert responsible party to string
-  let responsiblePartyStr = '';
-  if (typeof responsibleParty === 'string') {
-    responsiblePartyStr = responsibleParty;
-  } else if (Array.isArray(responsibleParty)) {
-    responsiblePartyStr = responsibleParty.map(item => {
-      if (typeof item === 'object' && item.LookupValue) {
-        return item.LookupValue;
-      }
-      if (typeof item === 'object' && item.Email) {
-        return item.Email;
-      }
-      return String(item);
-    }).join('; ');
-  } else if (responsibleParty && typeof responsibleParty === 'object') {
-    responsiblePartyStr = responsibleParty.LookupValue || responsibleParty.Email || String(responsibleParty);
-  } else {
-    responsiblePartyStr = String(responsibleParty || '');
-  }
-
+  const responsiblePartyStr = responsiblePartyToString(getTaskResponsibleParty(task));
   if (!responsiblePartyStr || responsiblePartyStr.trim() === '') {
     return true; // No responsible party, show it
   }
 
-  // Find all users assigned to this task
-  const assignedUsers = users.filter(user => {
-    const userEmail = user.email || user.Email || user.mail || user.userPrincipalName || '';
-    const userDisplayName = user.displayName || user.DisplayName || '';
-    
-    // Only match if responsible party is not empty and contains the user's email or display name
-    return responsiblePartyStr && responsiblePartyStr.trim() !== '' && 
-           (responsiblePartyStr.includes(userEmail) || responsiblePartyStr.includes(userDisplayName));
-  });
-
-  // Collect all unique departments from all assigned users
-  const taskDepartments = new Set();
-  assignedUsers.forEach(assignedUser => {
-    const userDepts = assignedUser.departments || [];
-    userDepts.forEach(department => {
-      taskDepartments.add(department);
-    });
-  });
-
-  // Check if any of the task's departments match the user's departments
-  return Array.from(taskDepartments).some(dept => userDepartments.includes(dept));
+  const taskDepartments = getTaskDepartments(task, users);
+  const userDeptsLower = userDepartments.map(dept => String(dept).toLowerCase());
+  return Array.from(taskDepartments).some(dept => userDeptsLower.includes(dept));
 }
 

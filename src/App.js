@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import Dashboard from './Dashboard';
 import Database from './Database';
 import UsersPage from './UsersPage';
@@ -14,9 +14,7 @@ import ExitConfirmationPopup from './ExitConfirmationPopup';
 import BatchImportProgress from './components/BatchImportProgress';
 import BatchDeleteProgress from './components/BatchDeleteProgress';
 import { useAuth } from './Auth';
-import { globalTaskStore } from './globalTaskStore';
-import { microsoftDataService } from './microsoftDataService';
-import { azureTaskService } from './services/azureTaskService';
+import { useUsers } from './hooks/useUsers';
 
 function App() {
   const { userProfile } = useAuth();
@@ -24,37 +22,39 @@ function App() {
   const [deadlinesSubTab, setDeadlinesSubTab] = useState('sort');
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const [isDeadlinesDropdownOpen, setIsDeadlinesDropdownOpen] = useState(false);
-  const [users, setUsers] = useState([]);
-  const [dropdownCloseTimeout, setDropdownCloseTimeout] = useState(null);
-  const [syncLoading, setSyncLoading] = useState(false);
   const [showExitConfirmation, setShowExitConfirmation] = useState(false);
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [importProgress, setImportProgress] = useState(null);
   const [deleteProgress, setDeleteProgress] = useState(null);
 
+  // Users (enterprise + role/department assignments) for the Dashboard
+  const { users } = useUsers();
+
+  // Dropdown close-timer id lives in a ref, not state (C10)
+  const dropdownCloseTimeoutRef = useRef(null);
+
   // Handle dropdown hover with delay
   const handleDropdownMouseEnter = () => {
-    if (dropdownCloseTimeout) {
-      clearTimeout(dropdownCloseTimeout);
-      setDropdownCloseTimeout(null);
+    if (dropdownCloseTimeoutRef.current) {
+      clearTimeout(dropdownCloseTimeoutRef.current);
+      dropdownCloseTimeoutRef.current = null;
     }
   };
 
   const handleDropdownMouseLeave = () => {
-    const timeout = setTimeout(() => {
+    dropdownCloseTimeoutRef.current = setTimeout(() => {
       setIsDeadlinesDropdownOpen(false);
     }, 200);
-    setDropdownCloseTimeout(timeout);
   };
 
   // Cleanup timeout on unmount
   useEffect(() => {
     return () => {
-      if (dropdownCloseTimeout) {
-        clearTimeout(dropdownCloseTimeout);
+      if (dropdownCloseTimeoutRef.current) {
+        clearTimeout(dropdownCloseTimeoutRef.current);
       }
     };
-  }, [dropdownCloseTimeout]);
+  }, []);
 
   // Handle exit confirmation
   useEffect(() => {
@@ -81,69 +81,6 @@ function App() {
   const handleExitCancel = () => {
     setShowExitConfirmation(false);
   };
-
-  // Initialize Azure service (but let individual pages load their own data)
-  useEffect(() => {
-    const initialize = async () => {
-      if (userProfile) {
-        try {
-          await azureTaskService.initialize();
-          console.log('App: Azure service initialized');
-        } catch (error) {
-          console.error('App: Error initializing Azure service:', error);
-        }
-      }
-    };
-    initialize();
-  }, [userProfile]);
-
-  // Load users for Dashboard
-  useEffect(() => {
-    const loadUsers = async () => {
-      if (userProfile) {
-        try {
-          const usersData = await microsoftDataService.users.getEnterpriseUsers();
-          
-          // Load local assignments from localStorage
-          const USER_ASSIGNMENTS_KEY = 'user_assignments';
-          const localAssignments = JSON.parse(localStorage.getItem(USER_ASSIGNMENTS_KEY) || '{}');
-          
-          // Merge enterprise users with local assignments
-          const usersWithAssignments = usersData.map(user => ({
-            ...user,
-            departments: localAssignments[user.id]?.departments || [],
-            role: localAssignments[user.id]?.role || 'VIEWER'
-          }));
-          
-          console.log('App: Loaded users with assignments:', {
-            usersCount: usersWithAssignments.length,
-            localAssignments: localAssignments,
-            usersWithAssignments: usersWithAssignments
-          });
-          
-          setUsers(usersWithAssignments);
-        } catch (error) {
-          console.error('Error loading users:', error);
-        }
-      }
-    };
-
-    loadUsers();
-
-    // Listen for department/role changes and refresh users in background
-    const handleUserChange = () => {
-      console.log('App: User departments/roles changed, refreshing users...');
-      loadUsers();
-    };
-
-    window.addEventListener('userDepartmentsChanged', handleUserChange);
-    window.addEventListener('userRoleChanged', handleUserChange);
-
-    return () => {
-      window.removeEventListener('userDepartmentsChanged', handleUserChange);
-      window.removeEventListener('userRoleChanged', handleUserChange);
-    };
-  }, [userProfile]);
 
   // Listen for import progress updates from Database component
   useEffect(() => {

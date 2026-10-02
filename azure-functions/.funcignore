@@ -12,3 +12,6 @@ local.settings.json
 *.swp
 *.swo
 *~
+*.md
+test-*.js
+*.test.js

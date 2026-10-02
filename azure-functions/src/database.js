@@ -1,142 +1,257 @@
 const { CosmosClient } = require('@azure/cosmos');
+const { DefaultAzureCredential } = require('@azure/identity');
 
 let client = null;
 let container = null;
+let taskPartitionKeyFieldPromise = null;
+let userAssignmentsContainerPromise = null;
+
+// Fields owned by the server / Cosmos that clients must never overwrite.
+const SERVER_OWNED_FIELDS = ['id', '_etag', '_rid', '_ts', '_self', '_attachments'];
+
+const USER_ASSIGNMENTS_CONTAINER_ID = 'userAssignments';
+
+function statusCodeOf(err) {
+  const code = err && (err.statusCode ?? err.code);
+  return typeof code === 'number' ? code : null;
+}
+
+function httpError(statusCode, message) {
+  const e = new Error(message);
+  e.statusCode = statusCode;
+  return e;
+}
 
 function getClient() {
   if (!client) {
     const endpoint = process.env.COSMOS_ENDPOINT;
     const key = process.env.COSMOS_PRIMARY_KEY;
-    
-    if (!endpoint || !key) {
-      throw new Error('Cosmos DB connection not configured. Set COSMOS_ENDPOINT and COSMOS_PRIMARY_KEY');
+
+    if (!endpoint) {
+      throw new Error('Cosmos DB connection not configured. Set COSMOS_ENDPOINT (and optionally COSMOS_PRIMARY_KEY)');
     }
-    
-    client = new CosmosClient({ endpoint, key });
+
+    if (key) {
+      client = new CosmosClient({ endpoint, key });
+    } else {
+      // No key configured: authenticate with the Function App's managed
+      // identity / developer credentials via AAD.
+      client = new CosmosClient({ endpoint, aadCredentials: new DefaultAzureCredential() });
+    }
   }
   return client;
 }
 
+function getDatabaseId() {
+  return process.env.COSMOS_DATABASE_ID || 'housing-deadlines-db';
+}
+
 function getContainer() {
   if (!container) {
-    const databaseId = process.env.COSMOS_DATABASE_ID || 'housing-deadlines-db';
     const containerId = process.env.COSMOS_CONTAINER_ID || 'tasks';
-    
-    const client = getClient();
-    const database = client.database(databaseId);
-    container = database.container(containerId);
+    container = getClient().database(getDatabaseId()).container(containerId);
   }
   return container;
 }
 
-async function queryTasks() {
-  try {
-    const container = getContainer();
-    const { resources } = await container.items.readAll().fetchAll();
-    return resources;
-  } catch (err) {
-    console.error('Error querying tasks:', err);
-    throw err;
+/**
+ * Top-level field name of the tasks container's partition key (cached).
+ */
+function getTaskPartitionKeyField() {
+  if (!taskPartitionKeyFieldPromise) {
+    taskPartitionKeyFieldPromise = getContainer()
+      .read()
+      .then(({ resource }) => {
+        const path = (resource && resource.partitionKey && resource.partitionKey.paths && resource.partitionKey.paths[0]) || '/id';
+        return path.replace(/^\//, '').split('/')[0];
+      })
+      .catch((err) => {
+        // Don't cache failures.
+        taskPartitionKeyFieldPromise = null;
+        throw err;
+      });
   }
+  return taskPartitionKeyFieldPromise;
+}
+
+/**
+ * userAssignments container in the same database as tasks (create-if-not-exists, cached).
+ */
+function getUserAssignmentsContainer() {
+  if (!userAssignmentsContainerPromise) {
+    userAssignmentsContainerPromise = getClient()
+      .database(getDatabaseId())
+      .containers.createIfNotExists({
+        id: USER_ASSIGNMENTS_CONTAINER_ID,
+        partitionKey: { paths: ['/id'] },
+      })
+      .then(({ container: c }) => c)
+      .catch((err) => {
+        userAssignmentsContainerPromise = null;
+        // The identity may lack management-plane rights; fall back to a plain
+        // handle so reads still work if the container already exists.
+        if (statusCodeOf(err) === 403) {
+          return getClient().database(getDatabaseId()).container(USER_ASSIGNMENTS_CONTAINER_ID);
+        }
+        throw err;
+      });
+  }
+  return userAssignmentsContainerPromise;
+}
+
+async function queryTasks() {
+  const container = getContainer();
+  const maxTotal = Number.parseInt(process.env.MAX_TASKS_READ, 10) > 0
+    ? Number.parseInt(process.env.MAX_TASKS_READ, 10)
+    : 20000;
+
+  // Page through the container instead of a single unbounded fetchAll().
+  const iterator = container.items.readAll({ maxItemCount: 200 });
+  const results = [];
+  while (iterator.hasMoreResults() && results.length < maxTotal) {
+    const { resources } = await iterator.fetchNext();
+    if (resources && resources.length) {
+      results.push(...resources);
+    }
+  }
+  if (results.length > maxTotal) results.length = maxTotal;
+  return results;
 }
 
 async function createTask(taskData) {
-  try {
-    const container = getContainer();
-    
-    // Ensure the task has an id field (Cosmos DB requires it)
-    if (!taskData.id) {
-      // Generate a simple ID if not provided
-      taskData.id = taskData.id || `task-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-    }
-    
-    const { resource } = await container.items.create(taskData);
-    return resource;
-  } catch (err) {
-    console.error('Error creating task:', err);
-    console.error('Task data:', JSON.stringify(taskData, null, 2));
-    console.error('Error details:', JSON.stringify(err, null, 2));
-    throw err;
+  const container = getContainer();
+
+  if (!taskData.id) {
+    taskData.id = `task-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
   }
+
+  const { resource } = await container.items.create(taskData);
+  return resource;
 }
 
 async function updateTask(id, updates) {
-  try {
-    const container = getContainer();
-    
-    // Query for the item first to get its partition key
+  const container = getContainer();
+  const pkField = await getTaskPartitionKeyField();
+
+  // Prefer a point-read (cheap, returns the etag) when the partition key is /id.
+  let existingItem = null;
+  if (pkField === 'id') {
+    try {
+      const { resource } = await container.item(id, id).read();
+      existingItem = resource || null;
+    } catch (err) {
+      if (statusCodeOf(err) !== 404) throw err;
+    }
+  } else {
     const querySpec = {
       query: 'SELECT * FROM c WHERE c.id = @id',
-      parameters: [{ name: '@id', value: id }]
+      parameters: [{ name: '@id', value: id }],
     };
-    
     const { resources } = await container.items.query(querySpec).fetchAll();
-    
-    if (!resources || resources.length === 0) {
-      throw new Error(`Task with id ${id} not found`);
-    }
-    
-    const existingItem = resources[0];
-    
-    // Merge updates with existing item
-    const updated = { ...existingItem, ...updates };
-    
-    // Use the partition key from the existing item (usually 'id' field)
-    // Cosmos DB typically uses /id as partition key, so partition key value = id
-    const partitionKey = existingItem.id || id;
-    const { resource } = await container.item(id, partitionKey).replace(updated);
+    existingItem = (resources && resources[0]) || null;
+  }
+
+  if (!existingItem) {
+    throw httpError(404, `Task with id ${id} not found`);
+  }
+
+  // Strip server-owned fields so clients can't mass-assign them; also protect
+  // the partition key field from being changed via update.
+  const sanitized = { ...updates };
+  for (const field of SERVER_OWNED_FIELDS) delete sanitized[field];
+  delete sanitized[pkField];
+
+  const updated = { ...existingItem, ...sanitized };
+  const partitionKeyValue = existingItem[pkField] !== undefined ? existingItem[pkField] : id;
+
+  try {
+    const { resource } = await container.item(id, partitionKeyValue).replace(updated, {
+      accessCondition: { type: 'IfMatch', condition: existingItem._etag },
+    });
     return resource;
   } catch (err) {
-    console.error('Error updating task:', err);
-    console.error('Error details:', JSON.stringify(err, null, 2));
+    if (statusCodeOf(err) === 412) {
+      throw httpError(412, 'Task was modified by another request');
+    }
     throw err;
   }
 }
 
 async function deleteTask(id) {
+  const container = getContainer();
+
+  // Fast path: partition key value equals the id (the common /id setup).
   try {
-    const container = getContainer();
-    
-    // First, try direct delete assuming /id is the partition key
-    // This is the most common Cosmos DB setup
-    try {
-      await container.item(id, id).delete();
-      return { success: true };
-    } catch (directDeleteError) {
-      // If direct delete fails, try querying first to get the item
-      // This handles cases where partition key might be different
-      console.log('Direct delete failed, trying query-based approach:', directDeleteError.message);
-      
-      const querySpec = {
-        query: 'SELECT * FROM c WHERE c.id = @id',
-        parameters: [{ name: '@id', value: id }]
-      };
-      
-      const { resources } = await container.items.query(querySpec).fetchAll();
-      
-      if (!resources || resources.length === 0) {
-        throw new Error(`Task with id ${id} not found`);
-      }
-      
-      const item = resources[0];
-      
-      // Try delete with id as partition key (most common case)
-      try {
-        await container.item(id, id).delete();
-        return { success: true };
-      } catch (secondDeleteError) {
-        // If still failing, the partition key might be different
-        // Log the error for debugging
-        console.error('Delete failed even after query:', secondDeleteError);
-        console.error('Item found:', JSON.stringify(item, null, 2));
-        throw new Error(`Failed to delete task: ${secondDeleteError.message}`);
-      }
-    }
+    await container.item(id, id).delete();
+    return { success: true };
+  } catch (directDeleteError) {
+    if (statusCodeOf(directDeleteError) !== 404) throw directDeleteError;
+  }
+
+  // Fallback: find the item cross-partition and delete with its ACTUAL
+  // partition key value.
+  const querySpec = {
+    query: 'SELECT * FROM c WHERE c.id = @id',
+    parameters: [{ name: '@id', value: id }],
+  };
+  const { resources } = await container.items.query(querySpec).fetchAll();
+  if (!resources || resources.length === 0) {
+    throw httpError(404, `Task with id ${id} not found`);
+  }
+
+  const item = resources[0];
+  const pkField = await getTaskPartitionKeyField();
+  const partitionKeyValue = item[pkField];
+
+  try {
+    await container.item(id, partitionKeyValue).delete();
+    return { success: true };
   } catch (err) {
-    console.error('Error deleting task:', err);
-    console.error('Error details:', JSON.stringify(err, null, 2));
+    if (statusCodeOf(err) === 404) {
+      throw httpError(404, `Task with id ${id} not found`);
+    }
     throw err;
   }
+}
+
+// ---------------- userAssignments ----------------
+
+async function getUserAssignment(email) {
+  const id = String(email).toLowerCase();
+  const c = await getUserAssignmentsContainer();
+  try {
+    const { resource } = await c.item(id, id).read();
+    return resource || null;
+  } catch (err) {
+    if (statusCodeOf(err) === 404) return null;
+    throw err;
+  }
+}
+
+async function listUserAssignments() {
+  const c = await getUserAssignmentsContainer();
+  const { resources } = await c.items.readAll({ maxItemCount: 200 }).fetchAll();
+  return resources;
+}
+
+async function userAssignmentsIsEmpty() {
+  const c = await getUserAssignmentsContainer();
+  const iterator = c.items.query('SELECT TOP 1 c.id FROM c', { maxItemCount: 1 });
+  const { resources } = await iterator.fetchNext();
+  return !resources || resources.length === 0;
+}
+
+async function upsertUserAssignment({ email, role, departments }) {
+  const id = String(email).toLowerCase();
+  const c = await getUserAssignmentsContainer();
+  const doc = {
+    id,
+    email: id,
+    role,
+    departments: Array.isArray(departments) ? departments : [],
+  };
+  const { resource } = await c.items.upsert(doc);
+  return resource;
 }
 
 module.exports = {
@@ -145,5 +260,9 @@ module.exports = {
   updateTask,
   deleteTask,
   getClient,
-  getContainer
+  getContainer,
+  getUserAssignment,
+  listUserAssignments,
+  userAssignmentsIsEmpty,
+  upsertUserAssignment,
 };

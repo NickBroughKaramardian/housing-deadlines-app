@@ -1,4 +1,4 @@
-import { PublicClientApplication } from '@azure/msal-browser';
+import { PublicClientApplication, InteractionRequiredAuthError } from '@azure/msal-browser';
 import { Client } from '@microsoft/microsoft-graph-client';
 import { msalConfig, loginRequest } from './azureConfig';
 
@@ -97,6 +97,55 @@ export const getAccessToken = async () => {
       }
     }
     
+    throw error;
+  }
+};
+
+/**
+ * Get the Microsoft Entra ID token (audience = this SPA's clientId) for
+ * authenticating against the backend API.
+ * - Uses acquireTokenSilent (MSAL refreshes expired tokens automatically)
+ * - Forces a fresh request if the cached ID token expires within 5 minutes
+ * - Falls back to interactive login on InteractionRequiredAuthError
+ */
+export const getIdToken = async () => {
+  await initializeMsal();
+  const accounts = msalInstance.getAllAccounts();
+
+  if (accounts.length === 0) {
+    throw new Error('Not signed in. Please sign in to continue.');
+  }
+
+  const account = accounts[0];
+  const idTokenRequest = {
+    scopes: ['openid', 'profile', 'email'],
+    account
+  };
+
+  const expiresSoon = (claims) => {
+    const exp = claims?.exp;
+    return !exp || exp * 1000 - Date.now() < 5 * 60 * 1000;
+  };
+
+  try {
+    // Force a new token if the cached ID token is expired or about to expire
+    let result = await msalInstance.acquireTokenSilent({
+      ...idTokenRequest,
+      forceRefresh: expiresSoon(account.idTokenClaims)
+    });
+
+    if (expiresSoon(result.idTokenClaims)) {
+      result = await msalInstance.acquireTokenSilent({ ...idTokenRequest, forceRefresh: true });
+    }
+
+    return result.idToken;
+  } catch (error) {
+    if (error instanceof InteractionRequiredAuthError || error.errorCode === 'interaction_required') {
+      console.warn('getIdToken: silent acquisition failed, redirecting to interactive login');
+      await msalInstance.loginRedirect(loginRequest);
+      // loginRedirect navigates away; throw in case the redirect is delayed
+      throw new Error('Redirecting to sign-in...');
+    }
     throw error;
   }
 };

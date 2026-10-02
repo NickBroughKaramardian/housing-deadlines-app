@@ -2,47 +2,79 @@ import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import { 
   FunnelIcon, 
   MagnifyingGlassIcon,
-  CalendarDaysIcon,
-  UserIcon,
-  FolderIcon,
   PlusIcon,
   MinusIcon
 } from '@heroicons/react/24/outline';
-import { format, parseISO, isValid } from 'date-fns';
+import { format } from 'date-fns';
 import { taskManager } from './services/taskManager';
-import { microsoftDataService } from './microsoftDataService';
 import TaskCard from './TaskCard';
 import NoteModal from './components/NoteModal';
 import DeleteConfirmModal from './components/DeleteConfirmModal';
-import { getTaskDeadline, parseDeadlineDate, filterDeadlineTasks, getTaskStatus, getStatusColor, taskBelongsToUserDepartments } from './utils/taskHelpers';
+import {
+  getTaskDeadline,
+  parseDeadlineDate,
+  filterDeadlineTasks,
+  getTaskStatus,
+  getTaskDepartments,
+  getResponsiblePartyNames,
+  taskBelongsToUserDepartments
+} from './utils/taskHelpers';
 import { useAuth } from './Auth';
-// Removed taskUpdateService - using taskService instead
+import { useTasks } from './hooks/useTasks';
+import { useUsers } from './hooks/useUsers';
+
+// Static Tailwind class maps (P7): dynamic `bg-${color}-100` strings are
+// purged by the JIT compiler, so the classes must appear literally.
+const FILTER_BADGE_CLASSES = {
+  blue: 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300',
+  red: 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300',
+  green: 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300',
+  orange: 'bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-300',
+  gray: 'bg-gray-100 text-gray-700 dark:bg-gray-900/30 dark:text-gray-300'
+};
+
+const FILTER_ACTIVE_GRADIENTS = {
+  blue: 'from-blue-500 to-blue-600',
+  red: 'from-red-500 to-red-600',
+  green: 'from-green-500 to-green-600',
+  orange: 'from-orange-500 to-orange-600',
+  gray: 'from-gray-500 to-gray-600'
+};
+
+const EMPTY_FILTER = {
+  deadlineYear: '',
+  deadlineMonth: '',
+  deadlineDay: '',
+  responsibleParty: '',
+  department: [],
+  project: '',
+  search: ''
+};
+
+const MONTH_MAPPINGS = {
+  'jan': ['jan', 'january', '1', '01'],
+  'feb': ['feb', 'february', '2', '02'],
+  'mar': ['mar', 'march', '3', '03'],
+  'apr': ['apr', 'april', '4', '04'],
+  'may': ['may', '5', '05'],
+  'jun': ['jun', 'june', '6', '06'],
+  'jul': ['jul', 'july', '7', '07'],
+  'aug': ['aug', 'august', '8', '08'],
+  'sep': ['sep', 'september', '9', '09'],
+  'oct': ['oct', 'october', '10'],
+  'nov': ['nov', 'november', '11'],
+  'dec': ['dec', 'december', '12']
+};
 
 function SortDeadlinesPage() {
-  const [tasks, setTasks] = useState([]);
-  const [users, setUsers] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [updating, setUpdating] = useState(false);
+  const { tasks: allTasks, isLoading: loading } = useTasks();
+  const { users } = useUsers();
+  // Only show actual deadline instances (no recurring templates)
+  const tasks = useMemo(() => filterDeadlineTasks(allTasks), [allTasks]);
   const [activeFilter, setActiveFilter] = useState('active');
   const [sortBars, setSortBars] = useState([{ id: 1, sortBy: 'deadline', sortOrder: 'asc' }]);
   // Filters array - one filter object per sort bar
-  const [filters, setFilters] = useState([
-    {
-      deadlineYear: '',
-      deadlineMonth: '',
-      deadlineDay: '',
-      responsibleParty: '',
-      department: [],
-      project: '',
-      search: ''
-    }
-  ]);
-  // Legacy state for backward compatibility (will be removed)
-  const [secondaryFilter, setSecondaryFilter] = useState('');
-  const [deadlineYear, setDeadlineYear] = useState('');
-  const [deadlineMonth, setDeadlineMonth] = useState('');
-  const [deadlineDay, setDeadlineDay] = useState('');
-  const [selectedDepartments, setSelectedDepartments] = useState([]);
+  const [filters, setFilters] = useState([{ ...EMPTY_FILTER }]);
   const [departmentFilterEnabled, setDepartmentFilterEnabled] = useState(false);
   
   // Modal states
@@ -56,34 +88,14 @@ function SortDeadlinesPage() {
     if (sortBars.length < 4) {
       const newId = Math.max(...sortBars.map(b => b.id || 0), 0) + 1;
       setSortBars([...sortBars, { id: newId, sortBy: 'deadline', sortOrder: 'asc' }]);
-      // Add corresponding filter
-      setFilters([...filters, {
-        deadlineYear: '',
-        deadlineMonth: '',
-        deadlineDay: '',
-        responsibleParty: '',
-        department: [],
-        project: '',
-        search: ''
-      }]);
+      setFilters([...filters, { ...EMPTY_FILTER }]);
     }
   };
 
   const removeSortBar = (index) => {
     if (sortBars.length > 1 && index > 0) {
-      const newSortBars = sortBars.filter((_, i) => i !== index);
-      setSortBars(newSortBars);
-      // Remove corresponding filter
-      const newFilters = filters.filter((_, i) => i !== index);
-      setFilters(newFilters);
-      // Clear legacy filter state if removing the first bar
-      if (index === 0) {
-        setSecondaryFilter('');
-        setDeadlineYear('');
-        setDeadlineMonth('');
-        setDeadlineDay('');
-        setSelectedDepartments([]);
-      }
+      setSortBars(sortBars.filter((_, i) => i !== index));
+      setFilters(filters.filter((_, i) => i !== index));
     }
   };
 
@@ -94,24 +106,8 @@ function SortDeadlinesPage() {
     // Clear filter when sort bar type changes
     if (field === 'sortBy') {
       const newFilters = [...filters];
-      newFilters[index] = {
-        deadlineYear: '',
-        deadlineMonth: '',
-        deadlineDay: '',
-        responsibleParty: '',
-        department: [],
-        project: '',
-        search: ''
-      };
+      newFilters[index] = { ...EMPTY_FILTER };
       setFilters(newFilters);
-      // Clear legacy filter state when first sort bar type changes
-      if (index === 0) {
-        setSecondaryFilter('');
-        setDeadlineYear('');
-        setDeadlineMonth('');
-        setDeadlineDay('');
-        setSelectedDepartments([]);
-      }
     }
   };
 
@@ -127,9 +123,9 @@ function SortDeadlinesPage() {
         // Toggle department
         const deptIndex = currentDepts.indexOf(value);
         if (deptIndex >= 0) {
-          newFilters[index].department = currentDepts.filter(d => d !== value);
+          newFilters[index] = { ...newFilters[index], department: currentDepts.filter(d => d !== value) };
         } else {
-          newFilters[index].department = [...currentDepts, value];
+          newFilters[index] = { ...newFilters[index], department: [...currentDepts, value] };
         }
       }
     } else {
@@ -138,96 +134,13 @@ function SortDeadlinesPage() {
     setFilters(newFilters);
   };
 
-  const loadTasks = useCallback(async (forceRefresh = false) => {
-    try {
-      setLoading(true);
-
-      if (forceRefresh || !taskManager.isInitialized) {
-        await taskManager.initialize(forceRefresh);
-      }
-
-      const allTasks = taskManager.getAllTasks();
-      const deadlineTasks = filterDeadlineTasks(allTasks);
-      setTasks(deadlineTasks);
-    } catch (error) {
-      console.error('SortDeadlines: Error loading tasks:', error);
-      setTasks([]);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  // Toggle task completion using TaskManager
-  const toggleTaskCompletion = useCallback(async (taskId, currentStatus, shouldUpdateAll = false) => {
-    const newStatus = !currentStatus;
-    
-    try {
-      setUpdating(true);
-      
-      if (shouldUpdateAll) {
-        // Find all related tasks (same Task name and Project)
-        const currentTask = tasks.find(t => t.id === taskId);
-        if (currentTask) {
-          const relatedTasks = tasks.filter(t => 
-            (t.Task || t.title || t.task) === (currentTask.Task || currentTask.title || currentTask.task) && 
-            (t.Project || t.project) === (currentTask.Project || currentTask.project)
-          );
-          
-          // Use TaskManager batch update
-          await taskManager.batchUpdate(
-            relatedTasks.map(task => ({ id: task.id, updates: { completed: newStatus } }))
-          );
-          
-          console.log('SortDeadlines: Updated completion for', relatedTasks.length, 'related tasks');
-        }
-      } else {
-        // Update only this task using TaskManager
-        await taskManager.updateTask(taskId, { completed: newStatus });
-      }
-      
-      console.log('SortDeadlines: Task completion updated successfully');
-    } catch (error) {
-      console.error('SortDeadlines: Error updating task completion:', error);
-    } finally {
-      setUpdating(false);
-    }
-  }, [tasks]);
-
-  useEffect(() => {
-    loadTasks(true);
-
-    const unsubscribe = taskManager.subscribe(({ type }) => {
-      if (type === 'refreshed' || type === 'created' || type === 'updated' || type === 'deleted' || type === 'batchCreated' || type === 'batchUpdated' || type === 'batchDeleted') {
-        const allTasks = taskManager.getAllTasks();
-        setTasks(filterDeadlineTasks(allTasks));
-      }
-      if (type === 'loading') {
-        setLoading(taskManager.isLoading);
-      }
-    });
-
-    const handleTaskDataChanged = (event) => {
-      const { type } = event.detail;
-      if (type === 'refreshed' || type === 'created' || type === 'updated' || type === 'deleted' || type === 'batchCreated' || type === 'batchUpdated' || type === 'batchDeleted') {
-        const allTasks = taskManager.getAllTasks();
-        setTasks(filterDeadlineTasks(allTasks));
-      }
-    };
-
-    window.addEventListener('taskDataChanged', handleTaskDataChanged);
-
-    return () => {
-      unsubscribe();
-      window.removeEventListener('taskDataChanged', handleTaskDataChanged);
-    };
-  }, [loadTasks]);
-
-  // Action handlers for TaskCard
+  // Action handlers for TaskCard - surface failures to the user (C10)
   const handleToggleComplete = useCallback(async (taskId, currentStatus) => {
     try {
       await taskManager.updateTask(taskId, { completed: !currentStatus });
     } catch (error) {
       console.error('SortDeadlines: Error toggling completion:', error);
+      alert(`Failed to update task: ${error.message}`);
     }
   }, []);
 
@@ -236,6 +149,7 @@ function SortDeadlinesPage() {
       await taskManager.updateTask(taskId, { priority: currentUrgency ? 'Normal' : 'Urgent' });
     } catch (error) {
       console.error('SortDeadlines: Error toggling urgency:', error);
+      alert(`Failed to update task: ${error.message}`);
     }
   }, []);
 
@@ -249,6 +163,7 @@ function SortDeadlinesPage() {
       setNoteModal({ isOpen: false, task: null });
     } catch (error) {
       console.error('SortDeadlines: Error saving note:', error);
+      alert(`Failed to save note: ${error.message}`);
     }
   }, []);
 
@@ -265,239 +180,42 @@ function SortDeadlinesPage() {
     
     try {
       await taskManager.deleteTask(deleteModal.taskId);
-      setDeleteModal({ isOpen: false, taskId: null, taskName: null });
     } catch (error) {
       console.error('SortDeadlines: Error deleting task:', error);
+      alert(`Failed to delete task: ${error.message}`);
+    } finally {
       setDeleteModal({ isOpen: false, taskId: null, taskName: null });
     }
   }, [deleteModal]);
 
-  // Toggle task urgency using TaskManager (legacy - keeping for compatibility)
-  const toggleTaskUrgency = useCallback(async (taskId, currentUrgency, shouldUpdateAll = false) => {
-    const newPriority = currentUrgency ? 'Normal' : 'Urgent';
-    
-    try {
-      setUpdating(true);
-      
-      if (shouldUpdateAll) {
-        // Find all related tasks (same Task name and Project)
-        const currentTask = tasks.find(t => t.id === taskId);
-        if (currentTask) {
-          const relatedTasks = tasks.filter(t => 
-            (t.Task || t.title || t.task) === (currentTask.Task || currentTask.title || currentTask.task) && 
-            (t.Project || t.project) === (currentTask.Project || currentTask.project)
-          );
-          
-          // Use TaskManager batch update
-          await taskManager.batchUpdate(
-            relatedTasks.map(task => ({ id: task.id, updates: { priority: newPriority } }))
-          );
-          
-          console.log('SortDeadlines: Updated urgency for', relatedTasks.length, 'related tasks');
-        }
-      } else {
-        // Update only this task using TaskManager
-        await taskManager.updateTask(taskId, { priority: newPriority });
-      }
-      
-      console.log('SortDeadlines: Task urgency updated successfully');
-    } catch (error) {
-      console.error('SortDeadlines: Error updating task urgency:', error);
-    } finally {
-      setUpdating(false);
-    }
-  }, [tasks]);
-
-  // Delete task using TaskManager
-  const deleteTask = useCallback(async (taskId) => {
-    try {
-      setUpdating(true);
-      await taskManager.deleteTask(taskId);
-      console.log('SortDeadlines: Task deleted successfully');
-    } catch (error) {
-      console.error('SortDeadlines: Error deleting task:', error);
-    } finally {
-      setUpdating(false);
-    }
-  }, []);
-
-  // Load users
-  useEffect(() => {
-    const loadUsers = async () => {
-      try {
-        const usersData = await microsoftDataService.users.getEnterpriseUsers();
-        
-        // Load local assignments from localStorage and merge with users (same as Dashboard)
-        const USER_ASSIGNMENTS_KEY = 'user_assignments';
-        const localAssignments = JSON.parse(localStorage.getItem(USER_ASSIGNMENTS_KEY) || '{}');
-        
-        // Merge enterprise users with local assignments
-        const usersWithAssignments = (Array.isArray(usersData) ? usersData : []).map(user => ({
-          ...user,
-          departments: localAssignments[user.id]?.departments || [],
-          role: localAssignments[user.id]?.role || 'VIEWER'
-        }));
-        
-        setUsers(usersWithAssignments);
-      } catch (err) {
-        console.error('SortDeadlines: Error loading users:', err);
-        setUsers([]);
-      }
-    };
-    
-    loadUsers();
-    
-    // Listen for department/role changes and refresh users in background
-    const handleUserChange = async () => {
-      console.log('SortDeadlines: User departments/roles changed, refreshing users...');
-      try {
-        const usersData = await microsoftDataService.users.getEnterpriseUsers();
-        const USER_ASSIGNMENTS_KEY = 'user_assignments';
-        const localAssignments = JSON.parse(localStorage.getItem(USER_ASSIGNMENTS_KEY) || '{}');
-        const usersWithAssignments = (Array.isArray(usersData) ? usersData : []).map(user => ({
-          ...user,
-          departments: localAssignments[user.id]?.departments || [],
-          role: localAssignments[user.id]?.role || 'VIEWER'
-        }));
-        setUsers(usersWithAssignments);
-      } catch (err) {
-        console.error('SortDeadlines: Error refreshing users:', err);
-      }
-    };
-
-    window.addEventListener('userDepartmentsChanged', handleUserChange);
-    window.addEventListener('userRoleChanged', handleUserChange);
-    
-    return () => {
-      window.removeEventListener('userDepartmentsChanged', handleUserChange);
-      window.removeEventListener('userRoleChanged', handleUserChange);
-    };
-  }, []);
-
   // Load department filter setting
   useEffect(() => {
-    const loadDepartmentFilterSetting = () => {
-      try {
-        const saved = localStorage.getItem('departmentFilterEnabled');
-        setDepartmentFilterEnabled(saved === 'true');
-      } catch (err) {
-        console.error('SortDeadlines: Error loading department filter setting:', err);
-      }
-    };
+    try {
+      const saved = localStorage.getItem('departmentFilterEnabled');
+      setDepartmentFilterEnabled(saved === 'true');
+    } catch (err) {
+      console.error('SortDeadlines: Error loading department filter setting:', err);
+    }
 
-    loadDepartmentFilterSetting();
-
-    // Listen for setting changes
     const handleSettingChange = (event) => {
       const { enabled } = event.detail || {};
       setDepartmentFilterEnabled(enabled);
     };
 
     window.addEventListener('departmentFilterSettingChanged', handleSettingChange);
-
     return () => {
       window.removeEventListener('departmentFilterSettingChanged', handleSettingChange);
     };
   }, []);
 
-  // Get current user's departments
-  const getCurrentUserDepartments = () => {
-    if (!userProfile?.id) return [];
-    const USER_ASSIGNMENTS_KEY = 'user_assignments';
-    const localAssignments = JSON.parse(localStorage.getItem(USER_ASSIGNMENTS_KEY) || '{}');
-    return localAssignments[userProfile.id]?.departments || [];
-  };
-
-  // Parse deadline date helper
-  const parseDeadlineDate = (dateStr) => {
-    if (!dateStr) return null;
-    try {
-      // Parse date string carefully to avoid timezone issues
-      // If in yyyy-MM-dd format, parse components directly
-      if (typeof dateStr === 'string' && dateStr.includes('-')) {
-        const datePart = dateStr.split('T')[0]; // Get just the date part
-        const parts = datePart.split('-');
-        if (parts.length === 3) {
-          const year = parseInt(parts[0], 10);
-          const month = parseInt(parts[1], 10) - 1; // JS months are 0-indexed
-          const day = parseInt(parts[2], 10);
-          
-          if (!isNaN(year) && !isNaN(month) && !isNaN(day)) {
-            // Create date at noon local time to avoid timezone shifts
-            return new Date(year, month, day, 12, 0, 0);
-          }
-        }
-      }
-      
-      // Fallback to date-fns parsing for other formats
-      const parsed = parseISO(dateStr);
-      if (isValid(parsed)) {
-        parsed.setHours(12, 0, 0, 0);
-        return parsed;
-      }
-      
-      return null;
-    } catch (error) {
-      return null;
-    }
-  };
-
-  // Helper function for flexible deadline search
-  const matchesDeadlineSearch = (deadline, searchTerm) => {
-    if (!deadline || !searchTerm) return true;
-    
-    const search = searchTerm.toLowerCase().trim();
-    const date = parseDeadlineDate(deadline);
-    if (!date) return false;
-
-    // Month mappings for flexible search
-    const monthMappings = {
-      'jan': ['jan', 'january', '1', '01'],
-      'feb': ['feb', 'february', '2', '02'],
-      'mar': ['mar', 'march', '3', '03'],
-      'apr': ['apr', 'april', '4', '04'],
-      'may': ['may', '5', '05'],
-      'jun': ['jun', 'june', '6', '06'],
-      'jul': ['jul', 'july', '7', '07'],
-      'aug': ['aug', 'august', '8', '08'],
-      'sep': ['sep', 'september', '9', '09'],
-      'oct': ['oct', 'october', '10'],
-      'nov': ['nov', 'november', '11'],
-      'dec': ['dec', 'december', '12']
-    };
-
-    // Check month
-    const monthName = format(date, 'MMM').toLowerCase();
-    if (monthMappings[monthName]?.some(alias => search.includes(alias))) {
-      return true;
-    }
-
-    // Check year
-    const year = date.getFullYear().toString();
-    if (search.includes(year) || search.includes(year.slice(-2))) {
-      return true;
-    }
-
-    // Check day
-    const day = date.getDate().toString();
-    if (search.includes(day) || search.includes(day.padStart(2, '0'))) {
-      return true;
-    }
-
-    // Check full date formats
-    const fullDate = format(date, 'yyyy-MM-dd');
-    const shortDate = format(date, 'MM/dd/yyyy');
-    const monthDay = format(date, 'MMM dd');
-    const monthDayYear = format(date, 'MMM dd, yyyy');
-
-    return search.includes(fullDate) || 
-           search.includes(shortDate) || 
-           search.includes(monthDay.toLowerCase()) ||
-           search.includes(monthDayYear.toLowerCase());
-  };
+  // Stable responsible-party name resolver, memoized on users (P5, A2)
+  const resolveResponsiblePartyNames = useCallback(
+    (responsibleParty) => getResponsiblePartyNames(responsibleParty, users),
+    [users]
+  );
 
   // Helper function to check if a task matches a specific filter
-  const taskMatchesFilter = (task, filter, sortBy) => {
+  const taskMatchesFilter = useCallback((task, filter, sortBy) => {
     if (!filter) return true;
     
     switch (sortBy) {
@@ -525,23 +243,8 @@ function SortDeadlinesPage() {
           const monthName = format(date, 'MMM').toLowerCase();
           const monthNumber = (date.getMonth() + 1).toString();
           const monthNumberPadded = monthNumber.padStart(2, '0');
-          
-          const monthMappings = {
-            'jan': ['jan', 'january', '1', '01'],
-            'feb': ['feb', 'february', '2', '02'],
-            'mar': ['mar', 'march', '3', '03'],
-            'apr': ['apr', 'april', '4', '04'],
-            'may': ['may', '5', '05'],
-            'jun': ['jun', 'june', '6', '06'],
-            'jul': ['jul', 'july', '7', '07'],
-            'aug': ['aug', 'august', '8', '08'],
-            'sep': ['sep', 'september', '9', '09'],
-            'oct': ['oct', 'october', '10'],
-            'nov': ['nov', 'november', '11'],
-            'dec': ['dec', 'december', '12']
-          };
 
-          const currentMonthAliases = monthMappings[monthName] || [];
+          const currentMonthAliases = MONTH_MAPPINGS[monthName] || [];
           const matchesMonth = currentMonthAliases.some(alias => alias === monthSearch) ||
                               monthSearch === monthName ||
                               monthSearch === monthNumber ||
@@ -567,31 +270,13 @@ function SortDeadlinesPage() {
       case 'responsibleParty': {
         if (!filter.responsibleParty) return true;
         const filterLower = filter.responsibleParty.toLowerCase();
-        const responsibleNames = getResponsiblePartyNames(task.ResponsibleParty).toLowerCase();
+        const responsibleNames = resolveResponsiblePartyNames(task.ResponsibleParty || task.responsibleParty).toLowerCase();
         return responsibleNames.includes(filterLower);
       }
       
       case 'department': {
         if (!filter.department || filter.department.length === 0) return true;
-        const responsibleParty = task.ResponsibleParty || task.responsibleParty || '';
-        
-        // Find all users assigned to this task
-        const assignedUsers = users.filter(user => {
-          const userEmail = user.email || user.Email || user.mail || user.userPrincipalName || '';
-          const userDisplayName = user.displayName || user.DisplayName || '';
-          return responsibleParty && responsibleParty.trim() !== '' && 
-                 (responsibleParty.includes(userEmail) || responsibleParty.includes(userDisplayName));
-        });
-        
-        // Collect all unique departments from all assigned users
-        const taskDepartments = new Set();
-        assignedUsers.forEach(assignedUser => {
-          const userDepartments = assignedUser.departments || [];
-          userDepartments.forEach(department => {
-            taskDepartments.add(department);
-          });
-        });
-        
+        const taskDepartments = getTaskDepartments(task, users);
         // Task must belong to at least one selected department
         return filter.department.some(dept => taskDepartments.has(dept));
       }
@@ -599,17 +284,17 @@ function SortDeadlinesPage() {
       case 'project': {
         if (!filter.project) return true;
         const filterLower = filter.project.toLowerCase();
-        const proj = (task.Project || '').toLowerCase();
+        const proj = (task.Project || task.project || '').toLowerCase();
         return proj.includes(filterLower);
       }
       
       case 'search': {
         if (!filter.search) return true;
         const filterLower = filter.search.toLowerCase();
-        const taskName = (task.Task || '').toLowerCase();
-        const project = (task.Project || '').toLowerCase();
-        const responsiblePartyNames = getResponsiblePartyNames(task.ResponsibleParty).toLowerCase();
-        const notes = (task.Notes || '').toLowerCase();
+        const taskName = (task.Task || task.title || task.task || '').toLowerCase();
+        const project = (task.Project || task.project || '').toLowerCase();
+        const responsiblePartyNames = resolveResponsiblePartyNames(task.ResponsibleParty || task.responsibleParty).toLowerCase();
+        const notes = (task.Notes || task.note || '').toLowerCase();
         
         return taskName.includes(filterLower) || 
                project.includes(filterLower) || 
@@ -620,124 +305,24 @@ function SortDeadlinesPage() {
       default:
         return true;
     }
-  };
-
-  // Helper function for separate deadline search fields (legacy - kept for backward compatibility)
-  const matchesSeparateDeadlineSearch = (deadline) => {
-    if (!deadline) return true;
-    
-    const date = parseDeadlineDate(deadline);
-    if (!date) return false;
-
-    // If no filters are set, show all
-    if (!deadlineYear && !deadlineMonth && !deadlineDay) return true;
-
-    // Check year
-    if (deadlineYear) {
-      const year = date.getFullYear().toString();
-      if (!year.includes(deadlineYear) && !deadlineYear.includes(year)) {
-        return false;
-      }
-    }
-
-    // Check month (support abbreviated, full, and numeric)
-    if (deadlineMonth) {
-      const monthSearch = deadlineMonth.toLowerCase().trim();
-      const monthName = format(date, 'MMM').toLowerCase();
-      const monthNumber = (date.getMonth() + 1).toString();
-      const monthNumberPadded = monthNumber.padStart(2, '0');
-      
-      const monthMappings = {
-        'jan': ['jan', 'january', '1', '01'],
-        'feb': ['feb', 'february', '2', '02'],
-        'mar': ['mar', 'march', '3', '03'],
-        'apr': ['apr', 'april', '4', '04'],
-        'may': ['may', '5', '05'],
-        'jun': ['jun', 'june', '6', '06'],
-        'jul': ['jul', 'july', '7', '07'],
-        'aug': ['aug', 'august', '8', '08'],
-        'sep': ['sep', 'september', '9', '09'],
-        'oct': ['oct', 'october', '10'],
-        'nov': ['nov', 'november', '11'],
-        'dec': ['dec', 'december', '12']
-      };
-
-      const currentMonthAliases = monthMappings[monthName] || [];
-      const matchesMonth = currentMonthAliases.some(alias => alias === monthSearch) ||
-                          monthSearch === monthName ||
-                          monthSearch === monthNumber ||
-                          monthSearch === monthNumberPadded;
-
-      if (!matchesMonth) {
-        return false;
-      }
-    }
-
-    // Check day
-    if (deadlineDay) {
-      const day = date.getDate().toString();
-      const dayPadded = day.padStart(2, '0');
-      if (day !== deadlineDay && dayPadded !== deadlineDay) {
-        return false;
-      }
-    }
-
-    return true;
-  };
-
-  // Get calculated status
-  const getCalculatedStatus = useCallback((task) => getTaskStatus(task), []);
-
-  // Convert responsible party emails to display names
-  const getResponsiblePartyNames = (responsibleParty) => {
-    if (!responsibleParty || !users || users.length === 0) {
-      return String(responsibleParty || 'Unassigned');
-    }
-
-    // Handle if responsibleParty is an array or object
-    if (typeof responsibleParty !== 'string') {
-      if (Array.isArray(responsibleParty)) {
-        return responsibleParty.map(rp => {
-          if (typeof rp === 'object' && rp.LookupValue) {
-            return rp.LookupValue;
-          }
-          return String(rp);
-        }).join(', ');
-      } else if (typeof responsibleParty === 'object' && responsibleParty.LookupValue) {
-        return responsibleParty.LookupValue;
-      }
-      return String(responsibleParty);
-    }
-
-    const emails = responsibleParty.split(';').map(email => email.trim());
-    const names = emails.map(email => {
-      const user = users.find(u => 
-        u.mail === email || 
-        u.userPrincipalName === email || 
-        u.email === email || 
-        u.Email === email
-      );
-      return user ? user.displayName : email;
-    });
-
-    return names.join(', ');
-  };
+  }, [users, resolveResponsiblePartyNames]);
 
   // Filter and sort tasks
   const filteredAndSortedTasks = useMemo(() => {
-    // First apply department filter if enabled
+    // First apply department filter if enabled (departments come from the
+    // authenticated profile, not localStorage - S4)
     let preFiltered = tasks;
     if (departmentFilterEnabled) {
-      const userDepartments = getCurrentUserDepartments();
-      if (userDepartments && userDepartments.length > 0) {
+      const userDepartments = userProfile?.departments || [];
+      if (userDepartments.length > 0) {
         preFiltered = tasks.filter(task => 
           taskBelongsToUserDepartments(task, userDepartments, users)
         );
       }
     }
     
-    let filtered = preFiltered.filter(task => {
-      const status = getCalculatedStatus(task);
+    const filtered = preFiltered.filter(task => {
+      const status = getTaskStatus(task);
       const priority = (task.Priority || task.priority || '').toLowerCase();
       const isUrgent = priority === 'urgent';
       const isActiveStatus = status === 'Active' || status === 'Due Soon';
@@ -756,65 +341,6 @@ function SortDeadlinesPage() {
           return false;
         }
       }
-      
-      // Legacy filter support (for backward compatibility with existing state)
-      const primarySortBy = sortBars[0]?.sortBy || 'deadline';
-      if (primarySortBy === 'deadline' && (deadlineYear || deadlineMonth || deadlineDay)) {
-        // Use legacy deadline filter if new filter is empty
-        if (!filters[0]?.deadlineYear && !filters[0]?.deadlineMonth && !filters[0]?.deadlineDay) {
-          if (!matchesSeparateDeadlineSearch(getTaskDeadline(task))) return false;
-        }
-      } else if (primarySortBy === 'department' && selectedDepartments.length > 0) {
-        // Use legacy department filter if new filter is empty
-        if (!filters[0]?.department || filters[0].department.length === 0) {
-          const responsibleParty = task.ResponsibleParty || task.responsibleParty || '';
-          const assignedUsers = users.filter(user => {
-            const userEmail = user.email || user.Email || user.mail || user.userPrincipalName || '';
-            const userDisplayName = user.displayName || user.DisplayName || '';
-            return responsibleParty && responsibleParty.trim() !== '' && 
-                   (responsibleParty.includes(userEmail) || responsibleParty.includes(userDisplayName));
-          });
-          const taskDepartments = new Set();
-          assignedUsers.forEach(assignedUser => {
-            const userDepartments = assignedUser.departments || [];
-            userDepartments.forEach(department => {
-              taskDepartments.add(department);
-            });
-          });
-          if (!selectedDepartments.some(dept => taskDepartments.has(dept))) return false;
-        }
-      } else if (secondaryFilter) {
-        // Use legacy text filter if new filter is empty
-        const filterLower = secondaryFilter.toLowerCase();
-        switch (primarySortBy) {
-          case 'search':
-            if (!filters[0]?.search) {
-              const taskName = (task.Task || '').toLowerCase();
-              const project = (task.Project || '').toLowerCase();
-              const responsiblePartyNames = getResponsiblePartyNames(task.ResponsibleParty).toLowerCase();
-              const notes = (task.Notes || '').toLowerCase();
-              if (!taskName.includes(filterLower) && 
-                  !project.includes(filterLower) && 
-                  !responsiblePartyNames.includes(filterLower) && 
-                  !notes.includes(filterLower)) {
-                return false;
-              }
-            }
-            break;
-          case 'responsibleParty':
-            if (!filters[0]?.responsibleParty) {
-              const responsibleNames = getResponsiblePartyNames(task.ResponsibleParty).toLowerCase();
-              if (!responsibleNames.includes(filterLower)) return false;
-            }
-            break;
-          case 'project':
-            if (!filters[0]?.project) {
-              const proj = (task.Project || '').toLowerCase();
-              if (!proj.includes(filterLower)) return false;
-            }
-            break;
-        }
-      }
 
       return true;
     });
@@ -822,10 +348,9 @@ function SortDeadlinesPage() {
     // Helper function to get sort value for a task
     const getSortValue = (task, sortBy) => {
       switch (sortBy) {
-        case 'deadline':
-          return parseDeadlineDate(getTaskDeadline(task)) || new Date(0);
         case 'project':
-          return (task.Project || '').toLowerCase();
+          return (task.Project || task.project || '').toLowerCase();
+        case 'deadline':
         case 'responsibleParty':
         case 'department':
         case 'search':
@@ -843,16 +368,8 @@ function SortDeadlinesPage() {
         const bValue = getSortValue(b, sortBar.sortBy);
         
         let comparison = 0;
-        
-        if (sortBar.sortBy === 'project') {
-          // Alphabetical sorting for project
-          if (aValue < bValue) comparison = -1;
-          else if (aValue > bValue) comparison = 1;
-        } else {
-          // Chronological/numerical sorting for deadline and others
-          if (aValue < bValue) comparison = -1;
-          else if (aValue > bValue) comparison = 1;
-        }
+        if (aValue < bValue) comparison = -1;
+        else if (aValue > bValue) comparison = 1;
         
         // Apply sort order
         if (comparison !== 0) {
@@ -864,7 +381,33 @@ function SortDeadlinesPage() {
     });
 
     return filtered;
-  }, [tasks, activeFilter, sortBars, filters, secondaryFilter, deadlineYear, deadlineMonth, deadlineDay, selectedDepartments, users, departmentFilterEnabled, userProfile, getCalculatedStatus, getResponsiblePartyNames]);
+  }, [tasks, activeFilter, sortBars, filters, users, departmentFilterEnabled, userProfile, taskMatchesFilter]);
+
+  // Filter-count badges (P5: memoized instead of recomputed 5x per render)
+  const filterOptions = useMemo(() => {
+    let active = 0, overdue = 0, complete = 0, urgent = 0;
+    tasks.forEach(task => {
+      const status = getTaskStatus(task);
+      const isActiveStatus = status === 'Active' || status === 'Due Soon';
+      if (isActiveStatus) {
+        active++;
+        const priority = (task.Priority || task.priority || '').toLowerCase();
+        if (priority === 'urgent') urgent++;
+      } else if (status === 'Overdue') {
+        overdue++;
+      } else if (status === 'Completed') {
+        complete++;
+      }
+    });
+
+    return [
+      { key: 'active', label: 'Active', count: active, color: 'blue' },
+      { key: 'overdue', label: 'Overdue', count: overdue, color: 'red' },
+      { key: 'complete', label: 'Complete', count: complete, color: 'green' },
+      { key: 'urgent', label: 'Urgent', count: urgent, color: 'orange' },
+      { key: 'all', label: 'All', count: tasks.length, color: 'gray' }
+    ];
+  }, [tasks]);
 
   if (loading) {
     return (
@@ -879,19 +422,6 @@ function SortDeadlinesPage() {
 
   return (
     <div className="min-h-screen bg-gray-50 dark:bg-gray-900 relative">
-      {/* Updating Overlay */}
-      {updating && (
-        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50">
-          <div className="bg-white dark:bg-gray-800 rounded-xl shadow-2xl p-8 flex flex-col items-center gap-4 border border-gray-200 dark:border-gray-700">
-            <div className="animate-spin rounded-full h-16 w-16 border-4 border-blue-200 border-t-blue-600"></div>
-            <div className="text-center">
-              <p className="text-lg font-semibold text-gray-900 dark:text-white">Updating...</p>
-              <p className="text-sm text-gray-600 dark:text-gray-400 mt-1">Syncing with database</p>
-            </div>
-          </div>
-        </div>
-      )}
-      
       <div className="max-w-7xl mx-auto p-6 space-y-6">
         {/* Header */}
         <div className="flex justify-between items-center">
@@ -921,52 +451,13 @@ function SortDeadlinesPage() {
               </h3>
             </div>
             <div className="flex flex-wrap gap-2">
-              {[
-                { 
-                  key: 'active',
-                  label: 'Active',
-                  count: tasks.filter(task => {
-                    const status = getCalculatedStatus(task);
-                    return status === 'Active' || status === 'Due Soon';
-                  }).length,
-                  color: 'blue'
-                },
-                { 
-                  key: 'overdue',
-                  label: 'Overdue',
-                  count: tasks.filter(task => getCalculatedStatus(task) === 'Overdue').length,
-                  color: 'red'
-                },
-                { 
-                  key: 'complete',
-                  label: 'Complete',
-                  count: tasks.filter(task => getCalculatedStatus(task) === 'Completed').length,
-                  color: 'green'
-                },
-                { 
-                  key: 'urgent',
-                  label: 'Urgent',
-                  count: tasks.filter(task => {
-                    const status = getCalculatedStatus(task);
-                    const priority = (task.Priority || task.priority || '').toLowerCase();
-                    return (status === 'Active' || status === 'Due Soon') && priority === 'urgent';
-                  }).length,
-                  color: 'orange'
-                },
-                { key: 'all', label: 'All', count: tasks.length, color: 'gray' }
-              ].map(filter => (
+              {filterOptions.map(filter => (
                 <button
                   key={filter.key}
                   onClick={() => setActiveFilter(filter.key)}
                   className={`group relative px-3 py-2 rounded-lg text-xs font-medium transition-all duration-200 ${
                     activeFilter === filter.key
-                      ? `bg-gradient-to-r ${
-                          filter.color === 'blue' ? 'from-blue-500 to-blue-600' :
-                          filter.color === 'red' ? 'from-red-500 to-red-600' :
-                          filter.color === 'green' ? 'from-green-500 to-green-600' :
-                          filter.color === 'orange' ? 'from-orange-500 to-orange-600' :
-                          'from-gray-500 to-gray-600'
-                        } text-white shadow-md`
+                      ? `bg-gradient-to-r ${FILTER_ACTIVE_GRADIENTS[filter.color]} text-white shadow-md`
                       : 'bg-white/60 dark:bg-gray-700/60 hover:bg-white dark:hover:bg-gray-700 text-gray-700 dark:text-gray-300 hover:shadow-sm'
                   }`}
                 >
@@ -974,7 +465,7 @@ function SortDeadlinesPage() {
                   <span className={`ml-1 px-1.5 py-0.5 rounded-full text-xs font-bold ${
                     activeFilter === filter.key 
                       ? 'bg-white/20 text-white' 
-                      : `bg-${filter.color}-100 text-${filter.color}-700 dark:bg-${filter.color}-900/30 dark:text-${filter.color}-300`
+                      : FILTER_BADGE_CLASSES[filter.color]
                   }`}>
                     {filter.count}
                   </span>

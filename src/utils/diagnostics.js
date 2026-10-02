@@ -1,7 +1,11 @@
 // Comprehensive diagnostic system for database save/edit operations
 // This will log EVERY step of the process to identify issues
 
-const DIAGNOSTIC_MODE = true; // Set to false to disable all diagnostics
+// Diagnostics are automatically disabled in production builds (S5)
+const DIAGNOSTIC_MODE = process.env.NODE_ENV !== 'production';
+
+// Cap the in-memory log as a ring buffer to prevent unbounded growth (C9)
+const MAX_LOG_ENTRIES = 500;
 
 // Ensure diagnostics are always available, even if module hasn't loaded yet
 if (typeof window !== 'undefined' && !window.__DIAGNOSTIC_SYSTEM_LOADED__) {
@@ -27,11 +31,11 @@ class DiagnosticLogger {
     };
     
     this.logs.push(logEntry);
+    if (this.logs.length > MAX_LOG_ENTRIES) {
+      this.logs.splice(0, this.logs.length - MAX_LOG_ENTRIES);
+    }
     
     const prefix = `🔍 [DIAG] ${timestamp}ms - ${step}`;
-    const consoleMethod = type === 'error' ? console.error : 
-                           type === 'warn' ? console.warn : 
-                           console.log;
     
     console.group(prefix);
     console.log('Data:', logEntry.data);
@@ -154,10 +158,8 @@ if (typeof window !== 'undefined') {
   };
   
   window.__DIAGNOSTIC_SYSTEM_LOADED__ = true;
-  console.log('🔍 Diagnostic system loaded!');
-  console.log('   Use window.__EXPORT_DIAGNOSTICS__() to export logs');
-  console.log('   Use window.__VIEW_DIAGNOSTICS__() to view logs in console');
-  console.log('   Use window.__CLEAR_DIAGNOSTICS__() to clear logs');
-  console.log('   Use window.__DIAGNOSTIC_LOGGER__ to access logger directly');
+  if (DIAGNOSTIC_MODE) {
+    console.log('🔍 Diagnostic system loaded (dev mode). Use window.__EXPORT_DIAGNOSTICS__(), __VIEW_DIAGNOSTICS__(), __CLEAR_DIAGNOSTICS__().');
+  }
 }
 

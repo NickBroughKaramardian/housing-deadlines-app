@@ -20,12 +20,12 @@ jobs:
 
       - name: Install dependencies (Functions)
         working-directory: azure-functions
-        run: npm install --no-audit --no-fund
+        run: npm install --omit=dev --no-audit --no-fund
 
       - name: Zip package (Functions)
         working-directory: azure-functions
         run: |
-          zip -r ../functionapp.zip . -x "**/.git/**"
+          zip -r ../functionapp.zip . -x "**/.git/**" "local.settings.json" "*.md"
 
       - name: Deploy to Azure Functions
         uses: Azure/functions-action@v1

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import React, { useState, useCallback, useMemo, useRef } from 'react';
 import { 
   CheckIcon, 
   ClockIcon, 
@@ -11,19 +11,20 @@ import {
   DocumentTextIcon,
   XMarkIcon
 } from '@heroicons/react/24/outline';
-// globalTaskStore removed - using TaskManager instead
-import { azureTaskService } from './services/azureTaskService';
-import { microsoftDataService } from './microsoftDataService';
 import RecurringTaskRow from './components/RecurringTaskRow';
 import MultiResponsiblePartySelector from './components/MultiResponsiblePartySelector';
+import EditableCell from './components/EditableCell';
 import NoteModal from './components/NoteModal';
 import DeleteConfirmModal from './components/DeleteConfirmModal';
 import RecurrenceSelector from './components/RecurrenceSelector';
 import BatchAddModal from './components/BatchAddModal';
 import OperationLogModal from './components/OperationLogModal';
-import { diagnosticLogger, logStateChange } from './utils/diagnostics';
 import { taskManager } from './services/taskManager';
-import { operationHistoryService } from './services/operationHistoryService';
+import { runBatchImport, runBulkDelete, createTaskFromInput, generateAndSaveInstances } from './services/batchOperations';
+import { useTasks } from './hooks/useTasks';
+import { useUsers } from './hooks/useUsers';
+import { useTaskSelection } from './hooks/useTaskSelection';
+import { getTaskStatus, formatDisplayDate } from './utils/taskHelpers';
 import { useAuth } from './Auth';
 
 const createBulkDeleteInitialState = () => ({
@@ -36,635 +37,68 @@ const createBulkDeleteInitialState = () => ({
   confirmLabel: 'Delete'
 });
 
+// Column order for Tab navigation (status is excluded as it's not editable)
+const COLUMN_ORDER = ['task', 'project', 'deadline', 'responsibleParty'];
+
 function Database() {
   const { userProfile } = useAuth();
-  const [tasks, setTasks] = useState([]);
-  const [selectedTasks, setSelectedTasks] = useState([]);
-  const [isLoading, setIsLoading] = useState(false);
-  const [enterpriseUsers, setEnterpriseUsers] = useState([]);
-  
+
+  // Tasks come from taskManager - the single source of truth (C8)
+  const { tasks, isLoading } = useTasks();
+  const { users: enterpriseUsers } = useUsers();
+
   // Editing state
   const [editingCell, setEditingCell] = useState(null);
   const editInputRef = useRef(null);
   const editValueRef = useRef(null);
-  const inputValueRef = useRef(new Map()); // Track input values per task+field to prevent prop interference
-  
+
   // Recurring task state
   const [expandedRecurringTasks, setExpandedRecurringTasks] = useState(new Set());
   const [saving, setSaving] = useState(new Set());
-  const [savingFields, setSavingFields] = useState(new Map()); // Track saving state per task+field
-  const [savedFields, setSavedFields] = useState(new Map()); // Track recently saved fields for animation
-  const [newTaskRecurrence, setNewTaskRecurrence] = useState(null);
-  const recentlyDeletedIdsRef = useRef(new Set()); // Track recently deleted task IDs to prevent reload
+  const [savingFields, setSavingFields] = useState(new Map()); // Saving state per task+field
+  const [savedFields, setSavedFields] = useState(new Map()); // Recently saved fields for animation
   const [showRecurrenceModal, setShowRecurrenceModal] = useState(false);
   const [taskForRecurrence, setTaskForRecurrence] = useState(null);
-  const [hasLoaded, setHasLoaded] = useState(false);
-  const [showInitialLoader, setShowInitialLoader] = useState(true);
-  
-  // Import history and progress tracking
+  const recurrenceProcessingRef = useRef(false); // Double-submit guard (C5)
+
+  // Modals
   const [showImportHistory, setShowImportHistory] = useState(false);
-  const [importProgress, setImportProgress] = useState(null);
-  const currentBatchIdRef = useRef(null);
-  const batchTotalOperationsRef = useRef(null); // Store total operations for completion event even after unmount
-  
-  
-  // Note modal state
   const [noteModal, setNoteModal] = useState({ isOpen: false, task: null });
-  
-  // Delete modal state
   const [deleteModal, setDeleteModal] = useState({ isOpen: false, taskId: null, taskName: null });
   const [bulkDeleteModal, setBulkDeleteModal] = useState(() => createBulkDeleteInitialState());
-  const closeBulkDeleteModal = useCallback(() => {
-    setBulkDeleteModal(createBulkDeleteInitialState());
-  }, []);
-  
-  // Add task modal state
   const [showBatchAdd, setShowBatchAdd] = useState(false);
-  
+
   // Sorting and search state
   const [sortField, setSortField] = useState('deadline');
   const [sortDirection, setSortDirection] = useState('asc');
   const [searchTerm, setSearchTerm] = useState('');
   const [filterProject, setFilterProject] = useState('');
 
-  // Load tasks using TaskManager (single source of truth)
-  // CRITICAL: This ensures we only show tasks that exist in the database
-  const loadTasks = useCallback(async (silent = false, forceRefresh = false) => {
-    try {
-      if (!silent) {
-        setIsLoading(true);
-      }
-      
-      // CRITICAL: Force refresh from database to ensure no phantom tasks
-      if (forceRefresh || !taskManager.isInitialized) {
-        await taskManager.initialize(forceRefresh);
-      }
-      
-      // Get tasks from TaskManager (from memory, no API call)
-      const allTasks = taskManager.getAllTasks();
-      
-      // CRITICAL: Filter out recently deleted tasks to prevent them from reappearing
-      // CRITICAL: Also filter out unconfirmed optimistic tasks
-      const filteredTasks = Array.isArray(allTasks) 
-        ? allTasks.filter(task => {
-            // Remove recently deleted tasks
-            if (recentlyDeletedIdsRef.current.has(task.id)) {
-              return false;
-            }
-            // Remove stale unconfirmed optimistic tasks (older than 10 seconds)
-            // This allows time for batch operations to complete
-            if (task._optimistic && !task._confirmed) {
-              const optimisticAge = task._optimisticTimestamp ? Date.now() - task._optimisticTimestamp : 0;
-              if (optimisticAge > 10000) { // 10 seconds
-                console.warn(`⚠️ Database: Removing stale unconfirmed optimistic task: ${task.id} (age: ${optimisticAge}ms)`);
-                return false;
-              }
-              // Keep optimistic tasks that are recent (likely part of active batch operation)
-            }
-            return true;
-          })
-        : [];
-      
-      setTasks(filteredTasks);
-      setHasLoaded(true);
-      setTimeout(() => setShowInitialLoader(false), 200);
-      
-      // Performance: Log task count for monitoring
-      if (!silent) {
-        console.log(`✅ Database: Loaded ${filteredTasks.length} tasks from TaskManager`);
-      }
-    } catch (error) {
-      console.error('Database: Error loading tasks:', error);
-      setTasks([]);
-      setHasLoaded(true);
-      setTimeout(() => setShowInitialLoader(false), 200);
-    } finally {
-      if (!silent) {
-        setIsLoading(false);
-      }
-    }
-  }, []);
-
-  // Load enterprise users
-  useEffect(() => {
-    const loadUsers = async () => {
-      try {
-        const users = await microsoftDataService.users.getEnterpriseUsers();
-        setEnterpriseUsers(Array.isArray(users) ? users : []);
-      } catch (error) {
-        console.error('Database: Error loading users:', error);
-        setEnterpriseUsers([]);
-      }
-    };
-    loadUsers();
-  }, []);
-
-  // Subscribe to TaskManager events for instant updates
-  useEffect(() => {
-    // CRITICAL: Force refresh from database on mount to ensure no phantom tasks
-    taskManager.initialize(true).then(() => {
-      loadTasks(false, true);
-      
-      // Verify tasks match database (for debugging)
-      taskManager.verifyTasks().then(isValid => {
-        if (!isValid) {
-          console.warn('⚠️ Database: Task verification failed on mount, forcing refresh');
-          loadTasks(false, true);
-        }
-      }).catch(err => {
-        console.error('Database: Error verifying tasks:', err);
-      });
-    }).catch(error => {
-      console.error('Database: Failed to initialize TaskManager:', error);
-      loadTasks(false, true);
-    });
-
-    // Subscribe to TaskManager events
-    const unsubscribe = taskManager.subscribe(({ type, tasks: updatedTasks, task, taskId, ...data }) => {
-      if (type === 'refreshed' || type === 'created' || type === 'updated' || type === 'deleted' || type === 'batchCreated' || type === 'batchUpdated' || type === 'batchDeleted') {
-        // Reload tasks from TaskManager
-        const allTasks = taskManager.getAllTasks();
-        // CRITICAL: Filter out recently deleted and stale unconfirmed optimistic tasks
-        const filteredTasks = Array.isArray(allTasks) 
-          ? allTasks.filter(t => {
-              if (recentlyDeletedIdsRef.current.has(t.id)) return false;
-              // Only filter out unconfirmed optimistic tasks if they're older than 10 seconds
-              // This allows time for batch operations to complete
-              if (t._optimistic && !t._confirmed) {
-                const optimisticAge = t._optimisticTimestamp ? Date.now() - t._optimisticTimestamp : 0;
-                if (optimisticAge > 10000) { // 10 seconds
-                  console.warn(`⚠️ Database: Removing stale unconfirmed optimistic task: ${t.id} (age: ${optimisticAge}ms)`);
-                  return false;
-                }
-                // Keep optimistic tasks that are recent (likely part of active batch operation)
-              }
-              return true;
-            })
-          : [];
-        setTasks(filteredTasks);
-      }
-      
-      if (type === 'loading') {
-        setIsLoading(data.isLoading);
-      }
-    });
-
-    // Also listen to DOM events for cross-component communication
-    const handleTaskDataChanged = (event) => {
-      const { type, tasks: updatedTasks, task, taskId } = event.detail;
-      if (type === 'refreshed' || type === 'created' || type === 'updated' || type === 'deleted' || type === 'batchCreated' || type === 'batchUpdated' || type === 'batchDeleted') {
-        const allTasks = taskManager.getAllTasks();
-        // CRITICAL: Filter out recently deleted and stale unconfirmed optimistic tasks
-        const filteredTasks = Array.isArray(allTasks) 
-          ? allTasks.filter(t => {
-              if (recentlyDeletedIdsRef.current.has(t.id)) return false;
-              // Only filter out unconfirmed optimistic tasks if they're older than 10 seconds
-              // This allows time for batch operations to complete
-              if (t._optimistic && !t._confirmed) {
-                const optimisticAge = t._optimisticTimestamp ? Date.now() - t._optimisticTimestamp : 0;
-                if (optimisticAge > 10000) { // 10 seconds
-                  console.warn(`⚠️ Database: Removing stale unconfirmed optimistic task: ${t.id} (age: ${optimisticAge}ms)`);
-                  return false;
-                }
-                // Keep optimistic tasks that are recent (likely part of active batch operation)
-              }
-              return true;
-            })
-          : [];
-        setTasks(filteredTasks);
-      }
-    };
-
-    window.addEventListener('taskDataChanged', handleTaskDataChanged);
-
-    // Periodic verification (every 30 seconds) to catch any phantom tasks
-    const verificationInterval = setInterval(() => {
-      taskManager.verifyTasks().then(isValid => {
-        if (!isValid) {
-          console.warn('⚠️ Database: Periodic verification failed, refreshing from database');
-          taskManager.refresh().then(() => {
-            loadTasks(true, false); // Silent refresh
-          });
-        }
-      }).catch(err => {
-        console.error('Database: Error in periodic verification:', err);
-      });
-    }, 30000); // Every 30 seconds
-
-    return () => {
-      unsubscribe();
-      window.removeEventListener('taskDataChanged', handleTaskDataChanged);
-      clearInterval(verificationInterval);
-    };
-  }, [loadTasks]);
-
-  // Track import progress by listening to optimistic updates appearing in UI
-  useEffect(() => {
-    if (!importProgress?.isActive || !currentBatchIdRef.current) return;
-    
-    const batchStartTime = Date.now();
-    const trackedTaskIds = new Set(); // Track IDs we've already counted
-    
-    const handleTaskCreated = (event) => {
-      // Only track if this is the current batch
-      if (currentBatchIdRef.current === null) return;
-      
-      const { type, task, tasks: batchTasks } = event.detail;
-      
-      // Handle single task creation - count optimistic tasks that appear during batch
-      if (type === 'created' && task && task._optimistic) {
-        // Only count if we haven't counted this task yet and it appeared during batch
-        if (!trackedTaskIds.has(task.id)) {
-          trackedTaskIds.add(task.id);
-          setImportProgress(prev => {
-            if (!prev || !prev.isActive || prev.batchId !== currentBatchIdRef.current) return prev;
-            const updated = {
-              ...prev,
-              completed: Math.min(prev.completed + 1, prev.total),
-              success: prev.success + 1
-            };
-            window.dispatchEvent(new CustomEvent('importProgressUpdate', { detail: { progress: updated } }));
-            return updated;
-          });
-        }
-      }
-      
-      // Handle batch creation - count all optimistic tasks in batch
-      if (type === 'batchCreated' && Array.isArray(batchTasks)) {
-        const newTasks = batchTasks.filter(t => 
-          t._optimistic && !trackedTaskIds.has(t.id)
-        );
-        
-        if (newTasks.length > 0) {
-          newTasks.forEach(t => trackedTaskIds.add(t.id));
-          
-          setImportProgress(prev => {
-            if (!prev || !prev.isActive || prev.batchId !== currentBatchIdRef.current) return prev;
-            const updated = {
-              ...prev,
-              completed: Math.min(prev.completed + newTasks.length, prev.total),
-              success: prev.success + newTasks.length
-            };
-            window.dispatchEvent(new CustomEvent('importProgressUpdate', { detail: { progress: updated } }));
-            return updated;
-          });
-        }
-      }
-    };
-    
-    window.addEventListener('taskDataChanged', handleTaskCreated);
-    return () => {
-      window.removeEventListener('taskDataChanged', handleTaskCreated);
-    };
-  }, [importProgress?.isActive, importProgress?.batchId]);
-
-  // TaskManager handles normalization automatically - no duplicates should occur
-
-  // Calculate task status
-  const calculateStatus = useCallback((task) => {
-    if (task.completed) return 'Complete';
-    const deadline = task.deadline_date || task.deadline;
-    if (!deadline) return 'Active';
-    try {
-      let date;
-      if (typeof deadline === 'string' && deadline.match(/^\d{4}-\d{2}-\d{2}$/)) {
-        const [year, month, day] = deadline.split('-').map(Number);
-        date = new Date(year, month - 1, day);
-      } else {
-        const tempDate = new Date(deadline);
-        date = new Date(tempDate.getFullYear(), tempDate.getMonth(), tempDate.getDate());
-      }
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
-      if (date < today) return 'Overdue';
-      const daysUntil = Math.ceil((date - today) / (1000 * 60 * 60 * 24));
-      if (daysUntil <= 7) return 'Due Soon';
-      return 'Active';
-    } catch {
-      return 'Active';
-    }
-  }, []);
-
-  // Format date for display
-  const formatDeadlineDate = useCallback((dateStr) => {
-    if (!dateStr) return '';
-    try {
-      let date;
-      if (typeof dateStr === 'string' && dateStr.match(/^\d{4}-\d{2}-\d{2}$/)) {
-        const [year, month, day] = dateStr.split('-').map(Number);
-        date = new Date(year, month - 1, day);
-      } else {
-        const tempDate = new Date(dateStr);
-        date = new Date(tempDate.getFullYear(), tempDate.getMonth(), tempDate.getDate());
-      }
-      if (isNaN(date.getTime())) return '';
-      return date.toLocaleDateString('en-US', { month: 'short', day: '2-digit', year: 'numeric' });
-    } catch {
-      return '';
-    }
+  const closeBulkDeleteModal = useCallback(() => {
+    setBulkDeleteModal(createBulkDeleteInitialState());
   }, []);
 
   const formatTaskForModal = useCallback((task) => ({
     id: task.id,
     name: task.title || task.Task || task.task || 'Untitled Task',
     project: task.project || task.Project || '',
-    date: formatDeadlineDate(task.deadline_date || task.deadline || task.Deadline)
-  }), [formatDeadlineDate]);
+    date: formatDisplayDate(task.deadline_date || task.deadline || task.Deadline)
+  }), []);
 
-  // Convert responsible party emails to names
-  const getResponsiblePartyNames = useCallback((responsibleParty) => {
-    if (!responsibleParty || !enterpriseUsers || enterpriseUsers.length === 0) {
-      return responsibleParty || 'Unassigned';
-    }
+  // ---------------------------------------------------------------------------
+  // Editing
+  // ---------------------------------------------------------------------------
 
-    let emails = [];
-    
-    if (Array.isArray(responsibleParty)) {
-      emails = responsibleParty.map(item => {
-        if (typeof item === 'object' && item.LookupValue) {
-          return item.LookupValue;
-        }
-        if (typeof item === 'object' && item.Email) {
-          return item.Email;
-        }
-        return String(item);
-      });
-    } else if (typeof responsibleParty === 'string') {
-      emails = responsibleParty.split(/[,;]/).map(email => email.trim()).filter(Boolean);
-    } else {
-      emails = [String(responsibleParty)];
-    }
-
-    const names = emails.map(email => {
-      const user = enterpriseUsers.find(u => {
-        const userEmail = u.mail || u.userPrincipalName || u.email || u.Email || '';
-        return userEmail.toLowerCase() === email.toLowerCase();
-      });
-      
-      if (user) {
-        return user.displayName || user.DisplayName || email;
-      }
-      
-      return email;
-    });
-    
-    return names.join(', ');
-  }, [enterpriseUsers]);
-
-  // EditableCell component
-  const EditableCell = useCallback(({ task, field, className, type = 'text', editingCell, enterpriseUsers, editInputRef, editValueRef, saveEdit, startEditing, statusDisplay, moveToNextCell, savingFields, savedFields }) => {
-    const isEditing = editingCell?.taskId === task.id && editingCell?.field === field;
-    const savingKey = `${task.id}-${field}`;
-    const isSaving = savingFields?.has(savingKey);
-    const isSaved = savedFields?.has(savingKey);
-    
-    // CRITICAL FIX: Always read the latest value directly from task prop
-    // For 'project' field, check both 'project' and 'Project'
-    let value = '';
-    if (field === 'task') {
-      value = task.title || task.Task || '';
-    } else if (field === 'deadline') {
-      value = task.deadline_date || task.deadline || task.Deadline || '';
-    } else if (field === 'project') {
-      value = task.project || task.Project || '';
-    } else if (field === 'status' && statusDisplay) {
-      value = statusDisplay;
-    } else {
-      value = task[field] || '';
-    }
-    
-    // Get display value - for deadline, use the actual deadline value
-    let displayValue = value;
-    if (field === 'deadline' || field === 'deadline_date') {
-      const deadlineValue = task.deadline_date || task.deadline || task.Deadline || '';
-      displayValue = deadlineValue ? formatDeadlineDate(deadlineValue) : '';
-    }
-    
-    // FIX #3: Use controlled input with locked value while editing
-    // This prevents "Unassigned" from being inserted mid-type
-    const inputKey = `${task.id}-${field}`;
-    
-    // Initialize or get locked input value
-    if (isEditing) {
-      // When editing starts, lock the value from editValueRef
-      if (!inputValueRef.current.has(inputKey)) {
-        const lockedValue = editValueRef.current !== null && editValueRef.current !== undefined 
-          ? editValueRef.current 
-          : value;
-        inputValueRef.current.set(inputKey, lockedValue);
-      }
-    } else {
-      // When not editing, clear the locked value and sync with prop
-      if (inputValueRef.current.has(inputKey)) {
-        inputValueRef.current.delete(inputKey);
-      }
-    }
-    
-    // Get current input value (locked if editing, otherwise from prop)
-    const inputValue = isEditing 
-      ? (inputValueRef.current.get(inputKey) || editValueRef.current || value)
-      : value;
-    
-    if (isEditing) {
-      // Status field is auto-calculated and not editable - should never reach here
-      if (field === 'status') {
-        // If somehow editing is triggered for status, just cancel it
-        setEditingCell(null);
-        return (
-          <span className={className}>{displayValue}</span>
-        );
-      }
-      
-      // For date inputs, format value as YYYY-MM-DD
-      // Get current value from ref (locked) or fallback to prop value
-      const currentInputValue = inputValueRef.current.get(inputKey) || inputValue;
-      let formattedValue = currentInputValue;
-      if (type === 'date' && currentInputValue) {
-        try {
-          // If value is already in YYYY-MM-DD format, use it
-          if (typeof inputValue === 'string' && inputValue.match(/^\d{4}-\d{2}-\d{2}$/)) {
-            formattedValue = inputValue;
-          } else {
-            // Parse and format date
-            const date = new Date(inputValue);
-            if (!isNaN(date.getTime())) {
-              const year = date.getFullYear();
-              const month = String(date.getMonth() + 1).padStart(2, '0');
-              const day = String(date.getDate()).padStart(2, '0');
-              formattedValue = `${year}-${month}-${day}`;
-            }
-          }
-        } catch {
-          formattedValue = '';
-        }
-      }
-      
-      return (
-        <input
-          ref={editInputRef}
-          type={type}
-          key={`${task.id}-${field}-editing`}
-          value={formattedValue}
-          onChange={(e) => {
-            // FIX #3: Update locked input value directly
-            // This prevents prop updates from interfering with typing
-            const newValue = e.target.value;
-            inputValueRef.current.set(inputKey, newValue);
-            // Force re-render by toggling editingCell state
-            setEditingCell(prev => prev ? { ...prev, _forceUpdate: Date.now() } : null);
-          }}
-          className={`${className} border border-blue-500 rounded px-2 py-1 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100`}
-          onBlur={() => {
-            // Get current value from input element (most reliable for controlled input)
-            const currentValue = editInputRef.current?.value || inputValueRef.current.get(inputKey) || inputValue;
-            const initialValue = editValueRef.current || value;
-            if (currentValue !== initialValue) {
-              saveEdit(task.id, field, currentValue);
-            } else {
-              setEditingCell(null);
-            }
-            // Clear locked value when done editing
-            inputValueRef.current.delete(inputKey);
-          }}
-          onKeyDown={async (e) => {
-            if (e.key === 'Enter') {
-              e.preventDefault();
-              const currentValue = editInputRef.current?.value || inputValueRef.current.get(inputKey) || inputValue;
-              const initialValue = editValueRef.current || value;
-              if (currentValue !== initialValue) {
-                saveEdit(task.id, field, currentValue);
-              } else {
-                setEditingCell(null);
-              }
-              inputValueRef.current.delete(inputKey);
-            } else if (e.key === 'Escape') {
-              e.preventDefault();
-              setEditingCell(null);
-              inputValueRef.current.delete(inputKey);
-            } else if (e.key === 'Tab') {
-              e.preventDefault(); // Prevent default tab behavior
-              // Save current cell and move to next
-              const currentValue = editInputRef.current?.value || inputValueRef.current.get(inputKey) || inputValue;
-              const initialValue = editValueRef.current || value;
-              if (currentValue !== initialValue) {
-                // Save and get updated task, then move to next cell
-                const updatedTask = await saveEdit(task.id, field, currentValue, { clearEditing: false, returnUpdatedTask: true });
-                inputValueRef.current.delete(inputKey);
-                if (updatedTask) {
-                  moveToNextCell(task.id, field, updatedTask);
-                } else {
-                  moveToNextCell(task.id, field);
-                }
-              } else {
-                // No change, just move to next cell
-                inputValueRef.current.delete(inputKey);
-                moveToNextCell(task.id, field);
-              }
-            }
-          }}
-          autoFocus
-        />
-      );
-    }
-    
-    // CRITICAL FIX: Use key prop to force re-render when value changes
-    // This ensures the display value updates immediately after save
-    const displayKey = field === 'project' ? `${task.id}-project-${task.project || task.Project || ''}` :
-                      field === 'task' ? `${task.id}-task-${task.title || task.Task || ''}` :
-                      field === 'deadline' ? `${task.id}-deadline-${task.deadline_date || task.deadline || task.Deadline || ''}` :
-                      `${task.id}-${field}-${value}`;
-    
-    // Status field is auto-calculated and not editable
-    const isEditable = field !== 'status';
-    
-    return (
-      <span
-        key={displayKey}
-        className={`${className} ${isEditable ? 'cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700' : 'cursor-default'} px-2 py-1 rounded relative inline-flex items-center gap-1`}
-        onClick={isEditable ? () => {
-          const deadlineValue = field === 'deadline' ? (task.deadline_date || task.deadline || task.Deadline || '') : value;
-          startEditing(task.id, field, deadlineValue);
-        } : undefined}
-        title={isEditable ? "Click to edit" : "Status is auto-calculated"}
-      >
-        <span>{displayValue || (isEditable ? 'Click to edit' : '')}</span>
-        {isSaving && (
-          <span className="inline-block w-3 h-3 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" title="Saving..."></span>
-        )}
-        {isSaved && !isSaving && (
-          <CheckIcon className="w-4 h-4 text-green-500 animate-pulse" title="Saved!" />
-        )}
-      </span>
-    );
-  }, [formatDeadlineDate, savingFields, savedFields]);
-
-  // Track anchor point for shift+click range selection (macOS-like behavior)
-  // Anchor only changes on regular clicks, not on shift+click
-  const [anchorTaskId, setAnchorTaskId] = useState(null);
-
-  // Handle select all - selects all tasks including templates and instances
-  const handleSelectAll = useCallback(() => {
-    const allTaskIds = tasks.map(t => t.id);
-    setSelectedTasks(allTaskIds);
-    // Reset anchor point
-    setAnchorTaskId(null);
-  }, [tasks]);
-
-  // Handle clear selections
-  const handleClearSelections = useCallback(() => {
-    setSelectedTasks([]);
-  }, []);
-
-  // Helper functions for context-aware bulk actions
-  const areAllSelectedComplete = useCallback(() => {
-    if (selectedTasks.length === 0) return false;
-    const selectedTasksData = tasks.filter(t => selectedTasks.includes(t.id));
-    return selectedTasksData.length > 0 && selectedTasksData.every(t => t.completed === true);
-  }, [selectedTasks, tasks]);
-
-  const areAllSelectedUrgent = useCallback(() => {
-    if (selectedTasks.length === 0) return false;
-    const selectedTasksData = tasks.filter(t => selectedTasks.includes(t.id));
-    const getPriority = (task) => {
-      const priority = task.priority || task.Priority || 'Normal';
-      return priority === 'Urgent' ? 'Urgent' : 'Normal';
-    };
-    return selectedTasksData.length > 0 && selectedTasksData.every(t => getPriority(t) === 'Urgent');
-  }, [selectedTasks, tasks]);
-
-  // Helper to check if ALL tasks (not just selected) are complete
-  // Used when header checkbox selects all tasks
-  const areAllTasksComplete = useCallback(() => {
-    if (tasks.length === 0) return false;
-    return tasks.every(t => t.completed === true);
-  }, [tasks]);
-
-  // Helper to check if ALL tasks (not just selected) are urgent
-  const areAllTasksUrgent = useCallback(() => {
-    if (tasks.length === 0) return false;
-    const getPriority = (task) => {
-      const priority = task.priority || task.Priority || 'Normal';
-      return priority === 'Urgent' ? 'Urgent' : 'Normal';
-    };
-    return tasks.every(t => getPriority(t) === 'Urgent');
-  }, [tasks]);
-
-  // Column order for Tab navigation (status is excluded as it's not editable)
-  const columnOrder = ['task', 'project', 'deadline', 'responsibleParty'];
-  
-  // Get next field in column order
   const getNextField = useCallback((currentField) => {
-    const currentIndex = columnOrder.indexOf(currentField);
-    if (currentIndex === -1 || currentIndex === columnOrder.length - 1) {
-      return null; // No next field
+    const currentIndex = COLUMN_ORDER.indexOf(currentField);
+    if (currentIndex === -1 || currentIndex === COLUMN_ORDER.length - 1) {
+      return null;
     }
-    return columnOrder[currentIndex + 1];
+    return COLUMN_ORDER[currentIndex + 1];
   }, []);
-  
-  // Start editing a cell
+
   const startEditing = useCallback((taskId, field, currentValue) => {
     setEditingCell({ taskId, field });
-    // Store the initial value in editValueRef to prevent it from being overwritten during editing
     editValueRef.current = currentValue || '';
     setTimeout(() => {
       editInputRef.current?.focus();
@@ -673,20 +107,18 @@ function Database() {
       }
     }, 0);
   }, []);
-  
-  // Move to next editable cell
-  const moveToNextCell = useCallback(async (taskId, currentField, updatedTask = null) => {
+
+  const cancelEditing = useCallback(() => {
+    setEditingCell(null);
+  }, []);
+
+  const moveToNextCell = useCallback((taskId, currentField, updatedTask = null) => {
     const nextField = getNextField(currentField);
     if (!nextField) return;
-    
-    // Use provided updatedTask if available, otherwise find from state
-    let task = updatedTask;
-    if (!task) {
-      task = tasks.find(t => t.id === taskId);
-    }
+
+    const task = updatedTask || taskManager.getTaskById(taskId);
     if (!task) return;
-    
-    // Get the value for the next field (status is excluded as it's not editable)
+
     let nextValue = '';
     if (nextField === 'task') {
       nextValue = task.title || task.task || '';
@@ -697,97 +129,20 @@ function Database() {
     } else if (nextField === 'responsibleParty') {
       nextValue = task.responsibleParty || task.ResponsibleParty || '';
     }
-    
-    // Start editing the next field
-    startEditing(taskId, nextField, nextValue);
-  }, [tasks, getNextField, startEditing]);
 
-  // Save edit with optimistic updates
-  const saveEdit = useCallback(async (taskId, field, newValue, options = {}) => {
-    const diagnosticId = `saveEdit-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-    const startTime = performance.now();
-    
-    // EXTENSIVE DIAGNOSTIC LOGGING: Log all parameter details
-    diagnosticLogger.log(`${diagnosticId}: saveEdit - ENTRY_RAW`, {
-      taskId,
-      taskIdType: typeof taskId,
-      field,
-      fieldType: typeof field,
-      newValue,
-      newValueType: typeof newValue,
-      newValueIsNull: newValue === null,
-      newValueIsUndefined: newValue === undefined,
-      newValueLength: newValue ? (typeof newValue === 'string' ? newValue.length : 'not-string') : null,
-      newValueStringified: newValue ? JSON.stringify(newValue) : 'null/undefined',
-      options,
-      optionsType: typeof options,
-      optionsIsObject: typeof options === 'object',
-      optionsKeys: options ? Object.keys(options) : null,
-      optionsStringified: JSON.stringify(options),
-      tasksArrayLength: tasks.length,
-      taskExists: !!tasks.find(t => t.id === taskId),
-      callStack: new Error().stack.split('\n').slice(1, 6).join('\n')
-    });
-    
-    diagnosticLogger.log(`${diagnosticId}: saveEdit - ENTRY`, {
-      taskId,
-      field,
-      newValue,
-      newValueType: typeof newValue,
-      newValueLength: newValue ? (typeof newValue === 'string' ? newValue.length : 'not-string') : null,
-      newValueStringified: newValue ? JSON.stringify(newValue) : 'null/undefined',
-      options,
-      optionsStringified: JSON.stringify(options),
-      tasksArrayLength: tasks.length,
-      taskExists: !!tasks.find(t => t.id === taskId)
-    });
-    
+    startEditing(taskId, nextField, nextValue);
+  }, [getNextField, startEditing]);
+
+  // Save an inline edit. taskManager owns the optimistic update and rollback;
+  // this component just tracks per-field saving/saved indicators.
+  const saveEdit = useCallback((taskId, field, newValue, options = {}) => {
     const { clearEditing = true, returnUpdatedTask = false } = options;
-    const task = tasks.find(t => t.id === taskId);
-    
-    if (!task) {
-      diagnosticLogger.log(`${diagnosticId}: saveEdit - TASK_NOT_FOUND`, {
-        taskId,
-        availableTaskIds: tasks.map(t => t.id)
-      }, 'error');
-      return returnUpdatedTask ? null : undefined;
-    }
-    
-    diagnosticLogger.log(`${diagnosticId}: saveEdit - TASK_FOUND`, {
-      taskId,
-      task: { ...task },
-      currentFieldValue: task[field],
-      currentTitle: task.title,
-      currentDeadline: task.deadline_date || task.deadline,
-      currentResponsibleParty: task.responsibleParty
-    });
-    
-    // Mark field as saving
-    const savingKey = `${taskId}-${field}`;
-    const prevSavingFields = savingFields;
-    setSavingFields(prev => {
-      const next = new Map(prev).set(savingKey, true);
-      diagnosticLogger.log(`${diagnosticId}: saveEdit - SET_SAVING_FIELDS`, {
-        savingKey,
-        prevSize: prev.size,
-        nextSize: next.size,
-        prevKeys: Array.from(prev.keys()),
-        nextKeys: Array.from(next.keys())
-      });
-      return next;
-    });
-    
-    // Optimistic update - update UI immediately
-    // Status field is auto-calculated and not editable - reject any save attempts
+
+    // Status is auto-calculated and not editable
     if (field === 'status') {
-      diagnosticLogger.log(`${diagnosticId}: saveEdit - STATUS_FIELD_NOT_EDITABLE`, {
-        taskId,
-        field,
-        warning: 'Status field is auto-calculated and cannot be edited'
-      }, 'warn');
       return returnUpdatedTask ? null : undefined;
     }
-    
+
     const updates = {};
     if (field === 'task') {
       updates.title = newValue;
@@ -796,260 +151,47 @@ function Database() {
     } else {
       updates[field] = newValue;
     }
-    
-    diagnosticLogger.log(`${diagnosticId}: saveEdit - UPDATES_CONSTRUCTED`, {
-      taskId,
-      field,
-      newValue,
-      newValueType: typeof newValue,
-      newValueLength: newValue ? (typeof newValue === 'string' ? newValue.length : 'not-string') : null,
-      newValueStringified: newValue ? JSON.stringify(newValue) : 'null/undefined',
-      updates,
-      updatesType: typeof updates,
-      updatesKeys: Object.keys(updates),
-      updatesStringified: JSON.stringify(updates),
-      updatesFieldValue: updates[field],
-      updatesFieldValueType: typeof updates[field],
-      updatesFieldValueLength: updates[field] ? (typeof updates[field] === 'string' ? updates[field].length : 'not-string') : null,
-      updatesFieldValueStringified: updates[field] ? JSON.stringify(updates[field]) : 'null/undefined',
-      // For responsibleParty specifically
-      isResponsibleParty: field === 'responsibleParty',
-      responsiblePartyUpdate: updates.responsibleParty,
-      responsiblePartyUpdateType: typeof updates.responsibleParty,
-      responsiblePartyUpdateLength: updates.responsibleParty ? (typeof updates.responsibleParty === 'string' ? updates.responsibleParty.length : 'not-string') : null,
-      responsiblePartyUpdateStringified: updates.responsibleParty ? JSON.stringify(updates.responsibleParty) : 'null/undefined'
-    });
-    
-    // Create updated task immediately - use same pattern as updateTask
-    // CRITICAL FIX: Always create a new object, even if values are the same
-    // This ensures React detects the change and triggers re-renders
-    const updatedTask = { ...task, ...updates };
-    
-    diagnosticLogger.log(`${diagnosticId}: saveEdit - UPDATED_TASK_CREATED`, {
-      originalTask: { ...task },
-      updatedTask: { ...updatedTask },
-      changes: Object.keys(updates),
-      taskReferenceChanged: task !== updatedTask,
-      taskIdChanged: task.id !== updatedTask.id,
-      valueChanged: JSON.stringify(task) !== JSON.stringify(updatedTask)
-    });
-    
-    // Get current tasks state before update
-    const tasksBeforeUpdate = [...tasks];
-    const taskIndexBefore = tasksBeforeUpdate.findIndex(t => t.id === taskId);
-    const taskBeforeUpdate = tasksBeforeUpdate[taskIndexBefore];
-    
-    // Update local state immediately (optimistic update) - use same pattern as updateTask
-    // CRITICAL FIX: Force a new array reference to ensure React detects the change
-    // This ensures React detects the change and triggers re-renders
-    setTasks(prevTasks => {
-      const updated = prevTasks.map(t => 
-        t.id === taskId ? updatedTask : t
-      );
-      
-      const taskIndexAfter = updated.findIndex(t => t.id === taskId);
-      const taskAfterUpdate = updated[taskIndexAfter];
-      
-      // CRITICAL FIX: Always return a new array reference, even if contents are the same
-      // This forces React to detect the change and trigger re-renders
-      const newArray = [...updated];
-      
-      // Find the updated task for diagnostic logging
-      const updatedTaskInArray = taskAfterUpdate;
-      const fieldValueBefore = taskBeforeUpdate ? (field === 'task' ? taskBeforeUpdate.title : field === 'deadline' ? taskBeforeUpdate.deadline_date : field === 'project' ? taskBeforeUpdate.project : taskBeforeUpdate[field]) : null;
-      const fieldValueAfter = updatedTaskInArray ? (field === 'task' ? updatedTaskInArray.title : field === 'deadline' ? updatedTaskInArray.deadline_date : field === 'project' ? updatedTaskInArray.project : updatedTaskInArray[field]) : null;
-      
-      diagnosticLogger.log(`${diagnosticId}: saveEdit - SET_TASKS_CALLED`, {
-        prevTasksLength: prevTasks.length,
-        updatedLength: updated.length,
-        newArrayLength: newArray.length,
-        taskIndexBefore,
-        taskIndexAfter,
-        taskBeforeUpdate: taskBeforeUpdate ? { ...taskBeforeUpdate } : null,
-        taskAfterUpdate: updatedTaskInArray ? { ...updatedTaskInArray } : null,
-        arrayReferenceChanged: prevTasks !== newArray,
-        taskReferenceChanged: taskBeforeUpdate !== updatedTaskInArray,
-        taskIdMatch: updatedTaskInArray?.id === taskId,
-        field,
-        fieldValueBefore,
-        fieldValueAfter,
-        valueChanged: fieldValueBefore !== fieldValueAfter,
-        // For project field specifically
-        projectBefore: field === 'project' ? (taskBeforeUpdate?.project || taskBeforeUpdate?.Project) : null,
-        projectAfter: field === 'project' ? (updatedTaskInArray?.project || updatedTaskInArray?.Project) : null
-      });
-      
-      return newArray;
-    });
-    
-    // Clear editing state if requested (default: true)
+
+    const savingKey = `${taskId}-${field}`;
+    setSavingFields(prev => new Map(prev).set(savingKey, true));
     if (clearEditing) {
-      diagnosticLogger.log(`${diagnosticId}: saveEdit - CLEARING_EDITING`, {
-        editingCellBefore: editingCell,
-        clearEditing
-      });
       setEditingCell(null);
     }
-    
-    const optimisticUpdateTime = performance.now() - startTime;
-    diagnosticLogger.log(`${diagnosticId}: saveEdit - OPTIMISTIC_UPDATE_COMPLETE`, {
-      optimisticUpdateTime: `${optimisticUpdateTime.toFixed(2)}ms`,
-      updatedTask: { ...updatedTask }
-    });
-    
-    // Save to database using TaskManager (handles optimistic updates and event emission)
-    const apiStartTime = performance.now();
+
     taskManager.updateTask(taskId, updates)
-      .then((response) => {
-        const apiTime = performance.now() - apiStartTime;
-        
-        // CRITICAL FIX: Update state with API response to ensure consistency
-        // The API might normalize field names (e.g., project -> Project, responsibleParty -> ResponsibleParty), so we need to merge the response
-        // Handle both wrapped (response.data) and unwrapped (response) responses
-        const apiTask = response?.data || response;
-        if (apiTask && typeof apiTask === 'object') {
-          setTasks(prevTasks => {
-            const updated = prevTasks.map(t => {
-              if (t.id === taskId) {
-                // Merge API response, ensuring both lowercase and uppercase field names are preserved
-                const merged = { ...t, ...apiTask };
-                // CRITICAL: If API returns uppercase field names, also set lowercase versions for consistency
-                if (apiTask.ResponsibleParty && !apiTask.responsibleParty) {
-                  merged.responsibleParty = apiTask.ResponsibleParty;
-                }
-                if (apiTask.Project && !apiTask.project) {
-                  merged.project = apiTask.Project;
-                }
-                return merged;
-              }
-              return t;
-            });
-            const newArray = [...updated];
-            
-            const updatedTask = newArray.find(t => t.id === taskId);
-            diagnosticLogger.log(`${diagnosticId}: saveEdit - STATE_UPDATED_FROM_API`, {
-              taskId,
-              apiTask,
-              field,
-              projectValue: apiTask.project || apiTask.Project,
-              projectValueAlt: apiTask.Project || apiTask.project,
-              responsiblePartyValue: apiTask.responsibleParty || apiTask.ResponsibleParty,
-              responsiblePartyValueAlt: apiTask.ResponsibleParty || apiTask.responsibleParty,
-              updatedTaskInState: updatedTask ? {
-                id: updatedTask.id,
-                project: updatedTask.project || updatedTask.Project,
-                responsibleParty: updatedTask.responsibleParty || updatedTask.ResponsibleParty
-              } : null
-            });
-            
-            return newArray;
-          });
-        }
-        
-        diagnosticLogger.log(`${diagnosticId}: saveEdit - API_SUCCESS`, {
-          taskId,
-          updates,
-          response,
-          apiTime: `${apiTime.toFixed(2)}ms`,
-          totalTime: `${(performance.now() - startTime).toFixed(2)}ms`
-        });
-        
-        // Mark as saved (for visual feedback)
-        setSavedFields(prev => {
-          const next = new Map(prev).set(savingKey, Date.now());
-          diagnosticLogger.log(`${diagnosticId}: saveEdit - SET_SAVED_FIELDS`, {
-            savingKey,
-            savedAt: Date.now()
-          });
-          return next;
-        });
-        
-        // Remove saved indicator after 2 seconds
+      .then(() => {
+        setSavedFields(prev => new Map(prev).set(savingKey, Date.now()));
         setTimeout(() => {
           setSavedFields(prev => {
             const next = new Map(prev);
             next.delete(savingKey);
-            diagnosticLogger.log(`${diagnosticId}: saveEdit - CLEAR_SAVED_INDICATOR`, {
-              savingKey,
-              cleared: !next.has(savingKey)
-            });
             return next;
           });
         }, 2000);
       })
       .catch(error => {
-        const apiTime = performance.now() - apiStartTime;
-        diagnosticLogger.log(`${diagnosticId}: saveEdit - API_ERROR`, {
-          taskId,
-          updates,
-          error: {
-            message: error.message,
-            stack: error.stack,
-            name: error.name
-          },
-          apiTime: `${apiTime.toFixed(2)}ms`,
-          totalTime: `${(performance.now() - startTime).toFixed(2)}ms`
-        }, 'error');
-        
         console.error('Database: Error saving edit:', error);
-        
-        // Revert on error
-        diagnosticLogger.log(`${diagnosticId}: saveEdit - REVERTING_ON_ERROR`, {
-          taskId,
-          originalTask: { ...task }
-        });
-        
-        setTasks(prevTasks => {
-          const reverted = prevTasks.map(t => 
-            t.id === taskId ? task : t
-          );
-          diagnosticLogger.log(`${diagnosticId}: saveEdit - REVERTED_TASKS`, {
-            revertedTask: reverted.find(t => t.id === taskId)
-          });
-          return reverted;
-        });
-        // TaskManager handles rollback automatically
         alert(`Failed to save: ${error.message}`);
       })
       .finally(() => {
-        // Remove saving indicator
         setSavingFields(prev => {
           const next = new Map(prev);
           next.delete(savingKey);
-          diagnosticLogger.log(`${diagnosticId}: saveEdit - CLEAR_SAVING_INDICATOR`, {
-            savingKey,
-            cleared: !next.has(savingKey)
-          });
           return next;
         });
       });
-    
-    const totalTime = performance.now() - startTime;
-    diagnosticLogger.log(`${diagnosticId}: saveEdit - EXIT`, {
-      taskId,
-      field,
-      returnUpdatedTask,
-      updatedTask: returnUpdatedTask ? { ...updatedTask } : null,
-      totalTime: `${totalTime.toFixed(2)}ms`
-    });
-    
-    // Return updated task if requested (for use in moveToNextCell)
-    if (returnUpdatedTask) {
-      return updatedTask;
-    }
-  }, [tasks, savingFields, editingCell]);
 
-  // Update task with optimistic update
+    // taskManager applies the optimistic update synchronously, so the updated
+    // task is already available (used by Tab navigation)
+    if (returnUpdatedTask) {
+      return taskManager.getTaskById(taskId) || null;
+    }
+  }, []);
+
   const updateTask = useCallback(async (taskId, updates) => {
-    const task = tasks.find(t => t.id === taskId);
-    if (!task) return;
-    
     setSaving(prev => new Set(prev).add(taskId));
-    
     try {
-      // Use TaskManager - handles optimistic updates and event emission
       await taskManager.updateTask(taskId, updates);
-      // TaskManager will emit events, which will trigger our subscription to update state
     } catch (error) {
       console.error('Database: Error updating task:', error);
       alert(`Failed to update: ${error.message}`);
@@ -1060,1009 +202,119 @@ function Database() {
         return next;
       });
     }
-  }, [tasks]);
+  }, []);
 
-  // Delete task using TaskManager
+  // ---------------------------------------------------------------------------
+  // Delete / notes
+  // ---------------------------------------------------------------------------
+
   const deleteTask = useCallback(async (taskId, skipConfirm = false) => {
-    // FULL DIAGNOSTIC: Log all delete operations
-    const diagnosticId = `DELETE_${taskId}_${Date.now()}`;
-    console.group(`🔍 ${diagnosticId}: DELETE TASK DIAGNOSTIC`);
-    console.log('Timestamp:', new Date().toISOString());
-    console.log('Task ID:', taskId);
-    console.log('Skip Confirm:', skipConfirm);
-    console.log('Current Delete Modal State:', { ...deleteModal });
-    console.log('Tasks Array Length:', tasks.length);
-    console.log('Task in Array:', tasks.find(t => t.id === taskId));
-    console.log('Task in TaskManager:', taskManager.getTaskById(taskId));
-    console.log('Call Stack:', new Error().stack);
-    console.groupEnd();
-    
-    diagnosticLogger.log(`${diagnosticId}: DELETE_TASK_START`, {
-      taskId,
-      skipConfirm,
-      deleteModalState: { ...deleteModal },
-      tasksArrayLength: tasks.length,
-      taskFound: !!tasks.find(t => t.id === taskId),
-      taskData: tasks.find(t => t.id === taskId)
-    });
-    
     if (!skipConfirm) {
-      const task = tasks.find(t => t.id === taskId);
-      diagnosticLogger.log(`${diagnosticId}: DELETE_TASK_OPENING_MODAL`, {
-        taskId,
-        taskFound: !!task,
-        taskName: task?.title || task?.task || 'this task'
-      });
+      const task = taskManager.getTaskById(taskId);
       setDeleteModal({ isOpen: true, taskId, taskName: task?.title || task?.task || 'this task' });
       return;
     }
-    
-    // Find task from current state
-    const task = tasks.find(t => t.id === taskId);
-    if (!task) {
-      console.warn('Database: Task not found for deletion:', taskId);
-      diagnosticLogger.log(`${diagnosticId}: DELETE_TASK_NOT_FOUND`, {
-        taskId,
-        tasksArrayLength: tasks.length,
-        allTaskIds: tasks.map(t => t.id)
-      }, 'warn');
-      // Close modal even if task not found
-      setDeleteModal({ isOpen: false, taskId: null, taskName: null });
-      return;
-    }
-    
-    // Store task data for potential revert
-    const taskToDelete = { ...task };
-    
-    diagnosticLogger.log(`${diagnosticId}: DELETE_TASK_OPTIMISTIC_UPDATE`, {
-      taskId,
-      taskData: taskToDelete,
-      tasksBeforeLength: tasks.length
-    });
-    
-    // Close modal immediately after starting deletion
-    diagnosticLogger.log(`${diagnosticId}: DELETE_TASK_CLOSING_MODAL`, {
-      taskId,
-      modalStateBefore: { ...deleteModal }
-    });
+
     setDeleteModal({ isOpen: false, taskId: null, taskName: null });
-    
-    // CRITICAL: Add task ID to recently deleted set to prevent it from being reloaded
-    recentlyDeletedIdsRef.current.add(taskId);
-    
-    // Use TaskManager - handles optimistic updates, event emission, and rollback
+
     try {
       await taskManager.deleteTask(taskId);
-      // TaskManager will emit events, which will trigger our subscription to update state
-      // Also dispatch legacy event for backward compatibility
-      window.dispatchEvent(new CustomEvent('taskDeleted', {
-        detail: { taskId, taskData: taskToDelete }
-      }));
-      
-      // Remove from recently deleted set after a delay
-      setTimeout(() => {
-        recentlyDeletedIdsRef.current.delete(taskId);
-      }, 2000);
     } catch (error) {
       console.error('Database: Error deleting task:', error);
-      diagnosticLogger.log(`${diagnosticId}: DELETE_TASK_ERROR`, {
-        taskId,
-        error: {
-          message: error.message,
-          stack: error.stack,
-          name: error.name
-        }
-      }, 'error');
-      // TaskManager handles rollback automatically
       alert(`Failed to delete: ${error.message}`);
-      // Remove from recently deleted set even on error
-      recentlyDeletedIdsRef.current.delete(taskId);
     }
-  }, [tasks, loadTasks, deleteModal]);
+  }, []);
 
-  // Handle delete confirmation
   const handleDeleteConfirm = useCallback(() => {
-    const diagnosticId = `DELETE_CONFIRM_${Date.now()}`;
     const taskIdToDelete = deleteModal.taskId;
-    
-    console.group(`🔍 ${diagnosticId}: DELETE CONFIRM DIAGNOSTIC`);
-    console.log('Timestamp:', new Date().toISOString());
-    console.log('Task ID to Delete:', taskIdToDelete);
-    console.log('Delete Modal State:', { ...deleteModal });
-    console.log('Task in Array:', tasks.find(t => t.id === taskIdToDelete));
-    console.log('Call Stack:', new Error().stack);
-    console.groupEnd();
-    
-    diagnosticLogger.log(`${diagnosticId}: DELETE_CONFIRM_START`, {
-      taskId: taskIdToDelete,
-      deleteModalState: { ...deleteModal },
-      taskFound: !!tasks.find(t => t.id === taskIdToDelete)
-    });
-    
+    setDeleteModal({ isOpen: false, taskId: null, taskName: null });
     if (taskIdToDelete) {
-      // Close modal first to prevent double-click issues
-      diagnosticLogger.log(`${diagnosticId}: DELETE_CONFIRM_CLOSING_MODAL`, {
-        taskId: taskIdToDelete,
-        modalStateBefore: { ...deleteModal }
-      });
-      setDeleteModal({ isOpen: false, taskId: null, taskName: null });
-      
-      // Call deleteTask directly - no setTimeout needed
-      diagnosticLogger.log(`${diagnosticId}: DELETE_CONFIRM_CALLING_DELETE_TASK`, {
-        taskId: taskIdToDelete,
-        skipConfirm: true
-      });
       deleteTask(taskIdToDelete, true);
-    } else {
-      diagnosticLogger.log(`${diagnosticId}: DELETE_CONFIRM_NO_TASK_ID`, {
-        deleteModalState: { ...deleteModal }
-      }, 'warn');
     }
-  }, [deleteModal, deleteTask, tasks]);
+  }, [deleteModal, deleteTask]);
 
-  const handleBulkDeleteConfirm = useCallback(async () => {
-    const modalData = bulkDeleteModal;
-    closeBulkDeleteModal();
-
-    if (!modalData.taskIds || modalData.taskIds.length === 0) {
-      return;
-    }
-
-    const { mode, taskIds } = modalData;
-
-    try {
-      if (mode === 'selected-tasks') {
-        setSelectedTasks([]);
-        
-        // Determine if we need progress tracking
-        const DELETE_PROGRESS_THRESHOLD = 1000;
-        const needsProgress = taskIds.length >= DELETE_PROGRESS_THRESHOLD;
-        
-        if (needsProgress) {
-          // Track deletion start time for logging
-          const deletionStartTime = Date.now();
-          
-          // Initialize progress state
-          const batchId = `delete-${Date.now()}`;
-          const initialProgress = {
-            batchId,
-            total: taskIds.length,
-            completed: 0,
-            success: 0,
-            errors: 0,
-            isActive: true,
-            deletedTaskIds: taskIds // Track which task IDs are being deleted
-          };
-          window.dispatchEvent(new CustomEvent('deleteProgressUpdate', {
-            detail: { progress: initialProgress }
-          }));
-          
-          // Progress callback
-          const onProgress = (progress) => {
-            window.dispatchEvent(new CustomEvent('deleteProgressUpdate', {
-              detail: { progress: { ...progress, batchId } }
-            }));
-          };
-          
-          try {
-            const result = await taskManager.batchDelete(taskIds, {
-              onProgress,
-              chunkSize: 100,
-              threshold: DELETE_PROGRESS_THRESHOLD
-            });
-            
-            // Calculate duration
-            const deletionDuration = Date.now() - deletionStartTime;
-            
-            // Final progress update - use success count, not completed
-            const finalProgress = {
-              batchId,
-              total: taskIds.length,
-              completed: result.success, // Use actual successes
-              success: result.success,
-              errors: result.errors,
-              isActive: false,
-              deletedTaskIds: taskIds // Track which task IDs were deleted
-            };
-            window.dispatchEvent(new CustomEvent('deleteProgressUpdate', {
-              detail: { progress: finalProgress }
-            }));
-            
-            // Log deletion operation
-            const deletionStatus = result.errors === 0 
-              ? 'completed' 
-              : result.success === 0 
-              ? 'failed' 
-              : 'partial';
-            
-            operationHistoryService.addRecord({
-              type: 'delete',
-              totalTasks: taskIds.length,
-              successCount: result.success,
-              errorCount: result.errors,
-              duration: deletionDuration,
-              status: deletionStatus,
-              errors: result.errors > 0 ? [`${result.errors} deletion${result.errors !== 1 ? 's' : ''} failed`] : [],
-              performedBy: userProfile?.displayName || userProfile?.email || 'Unknown'
-            });
-            
-            if (result.errors > 0) {
-              alert(`Deleted ${result.success} task${result.success !== 1 ? 's' : ''} successfully. ${result.errors} task${result.errors !== 1 ? 's' : ''} failed to delete.`);
-            }
-          } catch (error) {
-            // Calculate duration even on error
-            const deletionDuration = Date.now() - deletionStartTime;
-            
-            // Error handling with progress update
-            const errorProgress = {
-              batchId,
-              total: taskIds.length,
-              completed: 0,
-              success: 0,
-              errors: taskIds.length,
-              isActive: false,
-              deletedTaskIds: taskIds // Track which task IDs were attempted
-            };
-            window.dispatchEvent(new CustomEvent('deleteProgressUpdate', {
-              detail: { progress: errorProgress }
-            }));
-            
-            // Log failed deletion
-            operationHistoryService.addRecord({
-              type: 'delete',
-              totalTasks: taskIds.length,
-              successCount: 0,
-              errorCount: taskIds.length,
-              duration: deletionDuration,
-              status: 'failed',
-              errors: [error.message || String(error)],
-              performedBy: userProfile?.displayName || userProfile?.email || 'Unknown'
-            });
-            
-            alert(`Failed to delete some tasks: ${error.message}`);
-          }
-        } else {
-          // Use existing fast path for small batches
-          const deletionStartTime = Date.now();
-          try {
-            const result = await taskManager.batchDelete(taskIds);
-            const deletionDuration = Date.now() - deletionStartTime;
-            
-            // Log deletion operation for small batches too
-            const deletionStatus = result.errors === 0 
-              ? 'completed' 
-              : result.success === 0 
-              ? 'failed' 
-              : 'partial';
-            
-            operationHistoryService.addRecord({
-              type: 'delete',
-              totalTasks: taskIds.length,
-              successCount: result.success || taskIds.length,
-              errorCount: result.errors || 0,
-              duration: deletionDuration,
-              status: deletionStatus,
-              errors: result.errors > 0 ? [`${result.errors} deletion${result.errors !== 1 ? 's' : ''} failed`] : [],
-              performedBy: userProfile?.displayName || userProfile?.email || 'Unknown'
-            });
-          } catch (error) {
-            const deletionDuration = Date.now() - deletionStartTime;
-            console.error('Database: Bulk delete error:', error);
-            
-            // Log failed deletion
-            operationHistoryService.addRecord({
-              type: 'delete',
-              totalTasks: taskIds.length,
-              successCount: 0,
-              errorCount: taskIds.length,
-              duration: deletionDuration,
-              status: 'failed',
-              errors: [error.message || String(error)],
-              performedBy: userProfile?.displayName || userProfile?.email || 'Unknown'
-            });
-            
-            alert(`Failed to delete some tasks: ${error.message}`);
-          }
-        }
-      }
-    } catch (error) {
-      console.error('Database: Bulk deletion error:', error);
-    }
-  }, [bulkDeleteModal, closeBulkDeleteModal]);
-
-  // Handle note save using TaskManager
   const handleNoteSave = useCallback(async (taskId, noteContent) => {
-    const task = tasks.find(t => t.id === taskId);
-    if (!task) return;
-    
     try {
-      // Use TaskManager - handles optimistic updates and event emission
       await taskManager.updateTask(taskId, { note: noteContent });
-      // TaskManager will emit events, which will trigger our subscription to update state
     } catch (error) {
       console.error('Database: Error saving note:', error);
       alert(`Failed to save note: ${error.message}`);
-      // TaskManager handles rollback automatically
-    }
-  }, [tasks]);
-
-  // Create task with optimistic update
-  const createTask = useCallback(async (taskData) => {
-    try {
-      // Ensure all required fields are present and properly formatted
-      const formattedData = {
-        title: taskData.title || taskData.Task || 'Untitled Task',
-        project: taskData.project || taskData.Project || 'Unassigned',
-        deadline_date: taskData.deadline_date || taskData.deadline || taskData.Deadline,
-        responsibleParty: taskData.responsibleParty || taskData.ResponsibleParty || '',
-        priority: taskData.priority || taskData.Priority || 'Normal',
-        completed: taskData.completed || false
-      };
-      
-      // Add note if provided (don't remove empty notes - they're optional)
-      if (taskData.note !== undefined && taskData.note !== null) {
-        formattedData.note = taskData.note;
-      } else if (taskData.notes !== undefined && taskData.notes !== null) {
-        formattedData.note = taskData.notes;
-      }
-      
-      // Remove any undefined or null values (but keep empty strings for note)
-      Object.keys(formattedData).forEach(key => {
-        if (key === 'note') {
-          // Keep note even if empty - it's a valid value
-          if (formattedData[key] === undefined || formattedData[key] === null) {
-            delete formattedData[key];
-          }
-        } else if (formattedData[key] === undefined || formattedData[key] === null || formattedData[key] === '') {
-          delete formattedData[key];
-        }
-      });
-      
-      // Keep deadline_date even if empty for required validation
-      if (!formattedData.deadline_date && (taskData.deadline_date || taskData.deadline || taskData.Deadline)) {
-        formattedData.deadline_date = taskData.deadline_date || taskData.deadline || taskData.Deadline;
-      }
-      
-      console.log('Database: Creating task with data:', formattedData);
-      
-      // Use TaskManager - handles optimistic updates and event emission
-      const created = await taskManager.createTask(formattedData);
-      // TaskManager will emit events, which will trigger our subscription to update state
-      
-      return created;
-    } catch (error) {
-      console.error('Database: Error creating task:', error);
-      console.error('Database: Task data was:', taskData);
-      // TaskManager handles rollback automatically
-      throw error;
     }
   }, []);
-  
-  // Generate recurring instances based on recurrence pattern
-  const generateRecurringInstances = useCallback((template, recurrence) => {
-    if (!recurrence || !recurrence.pattern) return [];
-    
-    const instances = [];
-    
-    // Use parseDeadlineDate helper to avoid timezone shifts
-    const { parseDeadlineDate } = require('./utils/taskHelpers');
-    const deadlineStr = template.deadline_date || template.deadline || template.Deadline;
-    const startDate = parseDeadlineDate(deadlineStr);
-    if (!startDate || isNaN(startDate.getTime())) return [];
-    
-    // Calculate end date
-    let endDate = new Date(startDate);
-    if (recurrence.endDate) {
-      endDate = new Date(recurrence.endDate);
-    } else if (recurrence.maxOccurrences) {
-      // Estimate end date based on max occurrences
-      const interval = recurrence.interval || 1;
-      if (recurrence.pattern === 'daily') {
-        endDate.setDate(endDate.getDate() + (interval * recurrence.maxOccurrences));
-      } else if (recurrence.pattern === 'weekly') {
-        endDate.setDate(endDate.getDate() + (interval * 7 * recurrence.maxOccurrences));
-      } else if (recurrence.pattern === 'monthly') {
-        endDate.setMonth(endDate.getMonth() + (interval * recurrence.maxOccurrences));
-      } else if (recurrence.pattern === 'yearly') {
-        endDate.setFullYear(endDate.getFullYear() + (interval * recurrence.maxOccurrences));
-      }
-    } else {
-      // When "Never" is selected (no endDate and no maxOccurrences), generate for 20 years ahead
-      endDate.setFullYear(endDate.getFullYear() + 20);
-    }
-    
-    let currentDate = new Date(startDate);
-    const interval = recurrence.interval || 1;
-    let instanceNumber = 1;
-    // When "Never" is selected, set a high maxInstances to ensure we generate instances for the full 20 years
-    // For monthly recurrence, 20 years = 240 months, so we need at least 240 instances
-    // For daily recurrence, 20 years = ~7300 days, so we need at least 7300 instances
-    // For weekly recurrence, 20 years = ~1040 weeks, so we need at least 1040 instances
-    // For yearly recurrence, 20 years = 20 instances
-    // Set to a safe high number to cover all cases
-    const maxInstances = recurrence.maxOccurrences || (recurrence.endDate ? 100 : 10000);
-    
-    // Helper to get next occurrence date
-    const getNextDate = (date, pattern, interval, daysOfWeek) => {
-      const next = new Date(date);
-      next.setHours(12, 0, 0, 0); // Set to noon to avoid timezone issues
-      
-      if (pattern === 'daily') {
-        next.setDate(next.getDate() + interval);
-      } else if (pattern === 'weekly') {
-        if (daysOfWeek && daysOfWeek.length > 0) {
-          // Map day names to day numbers (0 = Sunday, 1 = Monday, etc.)
-          const dayMap = { 
-            sunday: 0, monday: 1, tuesday: 2, wednesday: 3, 
-            thursday: 4, friday: 5, saturday: 6 
-          };
-          
-          // Convert day names to day numbers
-          const targetDays = daysOfWeek.map(day => dayMap[day.toLowerCase()]).filter(d => d !== undefined);
-          
-          if (targetDays.length === 0) {
-            // Fallback: use same day of week
-            next.setDate(next.getDate() + (7 * interval));
-          } else {
-            // Find the next occurrence of any selected day
-            let daysToAdd = 0;
-            let found = false;
-            let weekCount = 0;
-            
-            // Start from tomorrow to ensure we get the NEXT occurrence
-            next.setDate(next.getDate() + 1);
-            
-            while (!found && daysToAdd < 14) {
-              const currentDayOfWeek = next.getDay();
-              
-              if (targetDays.includes(currentDayOfWeek)) {
-                // Found a matching day
-                if (weekCount === 0 || (interval === 1 && weekCount === 0)) {
-                  // First week - use this day
-                  found = true;
-                } else if (weekCount >= interval) {
-                  // We've skipped enough weeks
-                  found = true;
-                } else {
-                  // Need to skip more weeks
-                  next.setDate(next.getDate() + 7);
-                  weekCount++;
-                  daysToAdd += 7;
-                  continue;
-                }
-              }
-              
-              if (!found) {
-                next.setDate(next.getDate() + 1);
-                daysToAdd++;
-                
-                // If we've gone through a full week, increment week count
-                if (daysToAdd % 7 === 0) {
-                  weekCount++;
-                }
-              }
-            }
-            
-            // If interval > 1 and we found a day in the first week, skip to the right week
-            if (found && interval > 1 && weekCount === 0) {
-              next.setDate(next.getDate() + (7 * (interval - 1)));
-            }
-          }
-        } else {
-          // No specific days - use same day of week
-          next.setDate(next.getDate() + (7 * interval));
-        }
-      } else if (pattern === 'monthly') {
-        // CRITICAL FIX: Use local date components to avoid timezone shifts
-        // Get the day of month from the original start date
-        const dayOfMonth = startDate.getDate();
-        
-        // Calculate next month using local date components
-        const currentYear = next.getFullYear();
-        const currentMonth = next.getMonth();
-        const nextMonth = currentMonth + interval;
-        const nextYear = currentYear + Math.floor(nextMonth / 12);
-        const finalMonth = nextMonth % 12;
-        
-        // Get the last day of the target month
-        const lastDayOfMonth = new Date(nextYear, finalMonth + 1, 0).getDate();
-        const targetDay = Math.min(dayOfMonth, lastDayOfMonth);
-        
-        // Set the date using local components to avoid timezone issues
-        next.setFullYear(nextYear, finalMonth, targetDay);
-        next.setHours(12, 0, 0, 0);
-      } else if (pattern === 'yearly') {
-        next.setFullYear(next.getFullYear() + interval);
-      }
-      
-      next.setHours(12, 0, 0, 0); // Ensure noon to avoid timezone shifts
-      return next;
-    };
-    
-    // Generate instances
-    // For weekly with specific days, generate all selected days in each interval week
-    if (recurrence.pattern === 'weekly' && recurrence.daysOfWeek && recurrence.daysOfWeek.length > 0) {
-      const dayMap = { 
-        sunday: 0, monday: 1, tuesday: 2, wednesday: 3, 
-        thursday: 4, friday: 5, saturday: 6 
-      };
-      const targetDays = recurrence.daysOfWeek.map(day => dayMap[day.toLowerCase()]).filter(d => d !== undefined);
-      
-        if (targetDays.length > 0) {
-          let weekOffset = 0;
-          let instanceCount = 0;
-          const originalDate = new Date(startDate);
-          originalDate.setHours(12, 0, 0, 0);
-          
-          // Check if original date matches any selected day
-          const originalDayOfWeek = originalDate.getDay();
-          const shouldIncludeOriginal = targetDays.includes(originalDayOfWeek);
-          
-          // If original date matches a selected day, include it as instance 0
-          if (shouldIncludeOriginal && instanceCount < maxInstances && originalDate <= endDate) {
-            const instanceDateStr = originalDate.toISOString().split('T')[0];
-            const instance = {
-              title: template.title || template.Task,
-              project: template.project || template.Project || 'Unassigned',
-              deadline_date: instanceDateStr,
-              responsibleParty: template.responsibleParty || template.ResponsibleParty || '',
-              priority: template.priority || template.Priority || 'Normal',
-              completed: false,
-              templateId: template.id
-            };
-            instances.push(instance);
-            instanceCount++;
-          }
-          
-          while (instanceCount < maxInstances && weekOffset < 1000) {
-            // Calculate the start of the week for this interval
-            const weekStart = new Date(startDate);
-            weekStart.setDate(weekStart.getDate() + (weekOffset * 7 * interval));
-            weekStart.setHours(12, 0, 0, 0);
-            
-            // For each selected day in this week
-            for (const targetDay of targetDays) {
-              if (instanceCount >= maxInstances) break;
-              
-              // Find the date for this day in this week
-              const currentDayOfWeek = weekStart.getDay();
-              let daysToAdd = targetDay - currentDayOfWeek;
-              if (daysToAdd < 0) daysToAdd += 7;
-              
-              const instanceDate = new Date(weekStart);
-              instanceDate.setDate(instanceDate.getDate() + daysToAdd);
-              instanceDate.setHours(12, 0, 0, 0);
-              
-              // Skip if this is the original date (already included as instance 0)
-              if (instanceDate.getTime() === originalDate.getTime()) {
-                continue;
-              }
-              
-              // Check if we've exceeded end date
-              if (instanceDate > endDate) {
-                weekOffset = 10000; // Force exit
-                break;
-              }
-              
-              const instanceDateStr = instanceDate.toISOString().split('T')[0];
-              
-              const instance = {
-                title: template.title || template.Task,
-                project: template.project || template.Project || 'Unassigned',
-                deadline_date: instanceDateStr,
-                responsibleParty: template.responsibleParty || template.ResponsibleParty || '',
-                priority: template.priority || template.Priority || 'Normal',
-                completed: false,
-                templateId: template.id
-              };
-              
-              instances.push(instance);
-              instanceCount++;
-            }
-            
-            weekOffset++;
-          }
-        }
-    } else {
-      // For other patterns (daily, monthly, yearly), include original date as instance 0
-      // Then generate subsequent instances
-      let currentDate = new Date(startDate);
-      currentDate.setHours(12, 0, 0, 0);
-      let instanceNumber = 0;
-      
-      // Include the original date as the first instance (instance 0)
-      if (instanceNumber < maxInstances && currentDate <= endDate) {
-        const instanceDate = currentDate.toISOString().split('T')[0];
-        const instance = {
-          title: template.title || template.Task,
-          project: template.project || template.Project || 'Unassigned',
-          deadline_date: instanceDate,
-          responsibleParty: template.responsibleParty || template.ResponsibleParty || '',
-          priority: template.priority || template.Priority || 'Normal',
-          completed: false,
-          templateId: template.id
-        };
-        instances.push(instance);
-        instanceNumber++;
-      }
-      
-      // Generate subsequent instances
-      while (instanceNumber < maxInstances) {
-        // Get next occurrence
-        currentDate = getNextDate(currentDate, recurrence.pattern, interval, recurrence.daysOfWeek);
-        
-        // Check if we've exceeded end date
-        if (currentDate > endDate) break;
-        
-        const instanceDate = currentDate.toISOString().split('T')[0];
-        
-        const instance = {
-          title: template.title || template.Task,
-          project: template.project || template.Project || 'Unassigned',
-          deadline_date: instanceDate,
-          responsibleParty: template.responsibleParty || template.ResponsibleParty || '',
-          priority: template.priority || template.Priority || 'Normal',
-          completed: false,
-          templateId: template.id // Link to template
-        };
-        
-        instances.push(instance);
-        instanceNumber++;
-      }
-    }
-    
-    return instances;
-  }, []);
 
-  // Generate and save recurring instances
-  const generateAndSaveInstances = useCallback(async (template, recurrence) => {
-    try {
-      let templateTask = template;
-      
-      // If template already has an ID, it exists - use it
-      // Otherwise, create a new template
-      if (!template.id) {
-        // Create the template task with recurrence data
-        const templateData = {
-          title: template.title || template.Task || 'Untitled Task',
-          project: template.project || template.Project || 'Unassigned',
-          deadline_date: template.deadline_date || template.deadline || template.Deadline,
-          responsibleParty: template.responsibleParty || template.ResponsibleParty || '',
-          priority: template.priority || template.Priority || 'Normal',
-          completed: template.completed || false,
-          recurrence: recurrence
-        };
-        
-        // Remove any undefined or null values
-        Object.keys(templateData).forEach(key => {
-          if (templateData[key] === undefined || templateData[key] === null) {
-            delete templateData[key];
-          }
-        });
-        
-        console.log('Database: Creating recurring task with data:', templateData);
-        
-        // Create the template using TaskManager
-        templateTask = await taskManager.createTask(templateData);
-        console.log('Database: Template created:', templateTask);
-      } else {
-        // Template already exists - use it (recurrence was already updated in handleRecurrenceDone)
-        templateTask = { ...template, recurrence };
-        console.log('Database: Using existing template:', templateTask.id);
-      }
-      
-      // Generate instances on the frontend
-      const instances = generateRecurringInstances(templateTask, recurrence);
-      console.log('Database: Generated', instances.length, 'instances');
-      
-      // Optimistic update - add template and instances to UI immediately
-      const allNewTasks = [templateTask, ...instances];
-      setTasks(prevTasks => [...prevTasks, ...allNewTasks]);
-      // TaskManager handles updates via events
-      
-      // Save all instances using TaskManager batch create
-      await taskManager.batchCreate(instances);
-      
-      return templateTask;
-    } catch (error) {
-      console.error('Database: Error generating instances:', error);
-      console.error('Database: Template data was:', template);
-      console.error('Database: Recurrence data was:', recurrence);
-      throw error;
-    }
-  }, [loadTasks, generateRecurringInstances]);
+  // ---------------------------------------------------------------------------
+  // Recurrence
+  // ---------------------------------------------------------------------------
 
-  // Handle recurrence selection
   const handleRecurrenceDone = useCallback(async (recurrence) => {
     if (!taskForRecurrence) return;
-    
-    // CRITICAL: Prevent double execution
-    if (handleRecurrenceDone.processing) {
-      console.warn('Database: handleRecurrenceDone already processing, ignoring duplicate call');
+
+    // Double-submit guard via ref (C5) - a property on the useCallback function
+    // object was recreated every render and never actually guarded anything
+    if (recurrenceProcessingRef.current) {
       return;
     }
-    
-    handleRecurrenceDone.processing = true;
-    
+    recurrenceProcessingRef.current = true;
+
     try {
       if (recurrence) {
-        // If task already exists (has an id), update it to add recurrence
         if (taskForRecurrence.id) {
-          // Update existing task to add recurrence
+          // Update existing task to add recurrence, then generate instances
           await taskManager.updateTask(taskForRecurrence.id, { recurrence });
-          
-          // Generate and save instances
-          const updatedTask = { ...taskForRecurrence, recurrence };
-          await generateAndSaveInstances(updatedTask, recurrence);
+          await generateAndSaveInstances({ ...taskForRecurrence, recurrence }, recurrence);
         } else {
-          // New task - create with recurrence
           await generateAndSaveInstances(taskForRecurrence, recurrence);
         }
       } else {
-        // No recurrence - just create/update as solo task
         if (taskForRecurrence.id) {
-          // Update existing task to remove recurrence if it had one
           await taskManager.updateTask(taskForRecurrence.id, { recurrence: null });
         } else {
-          // Create new solo task
-          await createTask(taskForRecurrence);
+          await createTaskFromInput(taskForRecurrence);
         }
       }
       setShowRecurrenceModal(false);
       setTaskForRecurrence(null);
-      setNewTaskRecurrence(null);
-      // No need to await - optimistic updates handle UI, background sync happens automatically
-      loadTasks(true).catch(() => {});
     } catch (error) {
       console.error('Database: Error creating task:', error);
       alert(`Failed to create task: ${error.message}`);
     } finally {
-      // Reset after a delay to allow processing to complete
       setTimeout(() => {
-        handleRecurrenceDone.processing = false;
+        recurrenceProcessingRef.current = false;
       }, 2000);
     }
-  }, [taskForRecurrence, generateAndSaveInstances, createTask, loadTasks]);
+  }, [taskForRecurrence]);
 
-  // Handle add new task - opens Add Tasks modal
+  // ---------------------------------------------------------------------------
+  // Batch add
+  // ---------------------------------------------------------------------------
+
   const handleAddTask = useCallback(() => {
     setShowBatchAdd(true);
   }, []);
 
-  // Handle batch add - creates multiple tasks
   const handleBatchAdd = useCallback(async (tasksToAdd) => {
-    const batchId = `batch-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-    const startTime = Date.now();
-    const errorMessages = [];
-    
+    if (!tasksToAdd || !Array.isArray(tasksToAdd) || tasksToAdd.length === 0) {
+      alert('Error: No tasks to add. Please try again.');
+      return;
+    }
+
     try {
-      console.log('Database: handleBatchAdd called with tasks:', tasksToAdd);
-      console.log('Database: Number of tasks received:', tasksToAdd?.length || 0);
-      
-      if (!tasksToAdd || !Array.isArray(tasksToAdd) || tasksToAdd.length === 0) {
-        console.error('Database: ERROR - No tasks provided to handleBatchAdd!');
-        alert('Error: No tasks to add. Please try again.');
-        return;
-      }
-      
-      // Separate recurring and non-recurring tasks
-      const recurringTasks = [];
-      const regularTasks = [];
-      
-      tasksToAdd.forEach(task => {
-        // Check if task has recurring flag AND valid recurrence object
-        if (task.recurring && task.recurrence && task.recurrence.pattern && task.recurrence.pattern !== 'none') {
-          recurringTasks.push(task);
-        } else {
-          regularTasks.push(task);
-        }
+      const result = await runBatchImport(tasksToAdd, {
+        performedBy: userProfile?.displayName || userProfile?.email || 'Unknown'
       });
-      
-      console.log('Database: Regular tasks:', regularTasks.length, regularTasks);
-      console.log('Database: Recurring tasks:', recurringTasks.length, recurringTasks);
-      
-      // Pre-calculate total operations (including recurring instances)
-      let totalOperations = regularTasks.length;
-      const recurringInstancesCount = [];
-      
-      for (const taskData of recurringTasks) {
-        try {
-          // Generate instances to count them (but don't save yet)
-          const templateData = {
-            title: taskData.title || taskData.Task || 'Untitled Task',
-            project: taskData.project || taskData.Project || 'Unassigned',
-            deadline_date: taskData.deadline_date || taskData.deadline || taskData.Deadline,
-            responsibleParty: taskData.responsibleParty || taskData.ResponsibleParty || '',
-            priority: taskData.priority || taskData.Priority || 'Normal',
-            completed: false,
-            recurrence: taskData.recurrence
-          };
-          const instances = generateRecurringInstances(templateData, taskData.recurrence);
-          recurringInstancesCount.push(instances.length);
-          totalOperations += instances.length; // Count instances, not template
-        } catch (error) {
-          console.error('Database: Error calculating recurring instances:', error);
-          recurringInstancesCount.push(0);
-        }
-      }
-      
-      // Initialize batch tracking
-      currentBatchIdRef.current = batchId;
-      batchTotalOperationsRef.current = totalOperations; // Store for use after unmount
-      
-      // Initialize progress - dispatch event for App.js to listen
-      const initialProgress = {
-        batchId,
-        total: totalOperations,
-        completed: 0,
-        success: 0,
-        errors: 0,
-        isActive: true
-      };
-      setImportProgress(initialProgress); // Keep local state for tracking
-      window.dispatchEvent(new CustomEvent('importProgressUpdate', { detail: { progress: initialProgress } }));
-      
-      // Create regular tasks sequentially
-      let successCount = 0;
-      let errorCount = 0;
-      
-      for (const taskData of regularTasks) {
-        try {
-          console.log('Database: Creating regular task:', taskData);
-          await createTask(taskData);
-          successCount++;
-        } catch (error) {
-          console.error('Database: Error creating task in batch:', error, taskData);
-          errorCount++;
-          errorMessages.push(`Task "${taskData.title || taskData.Task || 'Unknown'}": ${error.message || String(error)}`);
-          
-          // Update progress with error
-          setImportProgress(prev => {
-            if (!prev || prev.batchId !== batchId) return prev;
-            const updated = {
-              ...prev,
-              completed: prev.completed + 1,
-              errors: prev.errors + 1
-            };
-            window.dispatchEvent(new CustomEvent('importProgressUpdate', { detail: { progress: updated } }));
-            return updated;
-          });
-        }
-      }
-      
-      // Create recurring tasks using generateAndSaveInstances
-      let recurringIndex = 0;
-      for (const taskData of recurringTasks) {
-        try {
-          console.log('Database: Creating recurring task:', taskData, 'with recurrence:', taskData.recurrence);
-          
-          await generateAndSaveInstances(taskData, taskData.recurrence);
-          // Count instances (already calculated in recurringInstancesCount)
-          const instanceCount = recurringInstancesCount[recurringIndex] || 0;
-          successCount += instanceCount; // Count instances, not template
-          
-          // Manually update progress for successfully created instances
-          setImportProgress(prev => {
-            if (!prev || prev.batchId !== batchId) return prev;
-            const updated = {
-              ...prev,
-              completed: Math.min(prev.completed + instanceCount, prev.total),
-              success: prev.success + instanceCount
-            };
-            window.dispatchEvent(new CustomEvent('importProgressUpdate', { detail: { progress: updated } }));
-            return updated;
-          });
-        } catch (error) {
-          console.error('Database: Error creating recurring task in batch:', error, taskData);
-          const instanceCount = recurringInstancesCount[recurringIndex] || 0;
-          errorCount += instanceCount;
-          errorMessages.push(`Recurring task "${taskData.title || taskData.Task || 'Unknown'}": ${error.message || String(error)}`);
-          
-          // Update progress with errors
-          setImportProgress(prev => {
-            if (!prev || prev.batchId !== batchId) return prev;
-            const updated = {
-              ...prev,
-              completed: prev.completed + instanceCount,
-              errors: prev.errors + instanceCount
-            };
-            window.dispatchEvent(new CustomEvent('importProgressUpdate', { detail: { progress: updated } }));
-            return updated;
-          });
-        }
-        recurringIndex++;
-      }
-      
-      const duration = Date.now() - startTime;
-      
-      // Save to import history
-      try {
-        operationHistoryService.addRecord({
-          type: 'import',
-          totalTasks: totalOperations,
-          successCount: successCount,
-          errorCount: errorCount,
-          duration,
-          status: errorCount > 0 ? (successCount > 0 ? 'partial' : 'failed') : 'completed',
-          errors: errorMessages.length > 0 ? errorMessages : undefined,
-          performedBy: userProfile?.displayName || userProfile?.email || 'Unknown'
-        });
-      } catch (historyError) {
-        console.error('Database: Error saving import history:', historyError);
-        // Don't fail the import if history save fails
-      }
-      
-      // Mark progress as complete - ensure completed equals total
-      // CRITICAL: Always dispatch completion event, even if component has unmounted
-      // Use ref value to ensure we have totalOperations even after unmount
-      const totalOps = batchTotalOperationsRef.current || totalOperations;
-      const finalProgress = {
-        batchId,
-        total: totalOps,
-        completed: totalOps, // Ensure we reach 100%
-        success: successCount,
-        errors: errorCount,
-        isActive: false
-      };
-      
-      // Update local state if component is still mounted
-      setImportProgress(prev => {
-        if (!prev || prev.batchId !== batchId) {
-          // Component may have unmounted, but we still dispatch the event below
-          return prev;
-        }
-        return finalProgress;
-      });
-      
-      // ALWAYS dispatch the completion event, regardless of component state
-      window.dispatchEvent(new CustomEvent('importProgressUpdate', { detail: { progress: finalProgress } }));
-      
-      // Clear batch tracking after a short delay to allow progress bar to show completion
-      setTimeout(() => {
-        if (currentBatchIdRef.current === batchId) {
-          currentBatchIdRef.current = null;
-        }
-      }, 2500); // Slightly longer than progress bar display time
-      
-      console.log('Database: Batch add completed. Success:', successCount, 'Errors:', errorCount);
-      
-      if (errorCount > 0) {
-        alert(`Batch add completed: ${successCount} task${successCount !== 1 ? 's' : ''} added successfully, ${errorCount} failed.`);
-      } else {
-        // Silent success - tasks are added optimistically
+      if (result.errorCount > 0) {
+        alert(`Batch add completed: ${result.successCount} task${result.successCount !== 1 ? 's' : ''} added successfully, ${result.errorCount} failed.`);
       }
     } catch (error) {
       console.error('Database: Error in batch add:', error);
-      
-      const duration = Date.now() - startTime;
-      
-      // Save failed import to history
-      try {
-        operationHistoryService.addRecord({
-          type: 'import',
-          totalTasks: tasksToAdd.length,
-          successCount: 0,
-          errorCount: tasksToAdd.length,
-          duration,
-          status: 'failed',
-          errors: [error.message || String(error)],
-          performedBy: userProfile?.displayName || userProfile?.email || 'Unknown'
-        });
-      } catch (historyError) {
-        console.error('Database: Error saving failed import history:', historyError);
-      }
-      
-      // Clear progress
-      setImportProgress(null);
-      window.dispatchEvent(new CustomEvent('importProgressUpdate', { detail: { progress: null } }));
-      currentBatchIdRef.current = null;
-      
       alert(`Failed to add some tasks: ${error.message || 'Please try again.'}`);
     }
-  }, [createTask, generateAndSaveInstances]);
+  }, [userProfile]);
 
+  // ---------------------------------------------------------------------------
+  // Derived task lists
+  // ---------------------------------------------------------------------------
 
-  // Toggle recurring task expansion
   const handleExpandedChange = useCallback((templateId, isExpanded) => {
     setExpandedRecurringTasks(prev => {
       const next = new Set(prev);
@@ -2080,46 +332,25 @@ function Database() {
     const templates = [];
     const regular = [];
     const instanceTasks = [];
-    
+
     tasks.forEach(task => {
       if (task.recurrence) {
-        // This is a recurring template
         templates.push(task);
       } else if (task.templateId) {
-        // This is an instance of a recurring task
         instanceTasks.push(task);
       } else {
-        // This is a regular solo task
         regular.push(task);
       }
     });
-    
-    // Diagnostic logging for project field updates
-    const lampsonTask = regular.find(t => (t.title || t.Task || '').toLowerCase().includes('lampson'));
-    if (lampsonTask) {
-      diagnosticLogger.log(`regularTasks-useMemo: RECALCULATED`, {
-        tasksLength: tasks.length,
-        regularLength: regular.length,
-        lampsonTaskId: lampsonTask.id,
-        lampsonProject: lampsonTask.project,
-        lampsonProjectAlt: lampsonTask.Project,
-        taskReference: lampsonTask
-      });
-    }
-    
+
     return { recurringTemplates: templates, regularTasks: regular, instances: instanceTasks };
   }, [tasks]);
 
-  const totalDeadlineCount = useMemo(() => {
-    return regularTasks.length + instances.length;
-  }, [regularTasks, instances]);
-
-  // Get all tasks for RecurringTaskRow (templates + instances)
+  // All tasks for RecurringTaskRow (templates + instances)
   const allTasksForRecurring = useMemo(() => {
     return [...recurringTemplates, ...instances];
   }, [recurringTemplates, instances]);
 
-  // Sorting and filtering logic
   const sortedAndFilteredRegularTasks = useMemo(() => {
     let filtered = [...regularTasks];
 
@@ -2178,10 +409,9 @@ function Database() {
     return filtered;
   }, [regularTasks, searchTerm, filterProject, sortField, sortDirection]);
 
-  // Filter recurring templates
   const filteredRecurringTemplates = useMemo(() => {
     let filtered = [...recurringTemplates];
-    
+
     if (searchTerm) {
       const searchLower = searchTerm.toLowerCase();
       filtered = filtered.filter(template => 
@@ -2189,26 +419,37 @@ function Database() {
         template.project?.toLowerCase().includes(searchLower)
       );
     }
-    
+
     if (filterProject) {
       filtered = filtered.filter(template => 
         template.project?.toLowerCase() === filterProject.toLowerCase()
       );
     }
-    
+
     return filtered;
   }, [recurringTemplates, searchTerm, filterProject]);
 
-  // Get all visible tasks in display order (for shift+click range selection)
-  // NOTE: Must be defined AFTER filteredRecurringTemplates, instances, and sortedAndFilteredRegularTasks
+  // All currently visible/selectable task ids (templates + their instances +
+  // filtered regular tasks). Used by select-all and the header checkbox (C10).
+  const selectableTaskIds = useMemo(() => {
+    const ids = new Set();
+    filteredRecurringTemplates.forEach(template => {
+      ids.add(template.id);
+      instances.forEach(inst => {
+        if (inst.templateId === template.id) ids.add(inst.id);
+      });
+    });
+    sortedAndFilteredRegularTasks.forEach(task => ids.add(task.id));
+    return ids;
+  }, [filteredRecurringTemplates, instances, sortedAndFilteredRegularTasks]);
+
+  // Visible tasks in display order (for shift+click range selection)
   const getAllVisibleTasksInOrder = useCallback(() => {
     const visibleTasks = [];
-    
-    // Add recurring templates (headers)
+
     filteredRecurringTemplates.forEach(template => {
       visibleTasks.push({ id: template.id, type: 'template', templateId: template.id });
-      
-      // Add instances if expanded
+
       if (expandedRecurringTasks.has(template.id)) {
         const templateInstances = instances
           .filter(inst => inst.templateId === template.id)
@@ -2222,170 +463,140 @@ function Database() {
         });
       }
     });
-    
-    // Add regular tasks
+
     sortedAndFilteredRegularTasks.forEach(task => {
       visibleTasks.push({ id: task.id, type: 'regular' });
     });
-    
+
     return visibleTasks;
   }, [filteredRecurringTemplates, expandedRecurringTasks, instances, sortedAndFilteredRegularTasks]);
 
-  // Handle task selection
-  // NOTE: Must be defined AFTER getAllVisibleTasksInOrder, recurringTemplates, and instances
-  const handleTaskSelection = useCallback((taskId, event = null) => {
-    // Check if this is a recurring template header checkbox being checked
-    const isTemplate = recurringTemplates.find(t => t.id === taskId);
-    const wasSelected = selectedTasks.includes(taskId);
-    
-    // Check if shift key is pressed and we have an anchor point
-    if (event?.shiftKey && anchorTaskId) {
-      if (anchorTaskId === taskId) {
-        // Shift+click on anchor itself: select just the anchor (range of 1)
-        setSelectedTasks([anchorTaskId]);
-        // Don't update anchor - it stays fixed
-        return;
-      }
-      
-      // Range selection - macOS-like behavior: use anchor point, don't update it
-      const allVisibleTasks = getAllVisibleTasksInOrder();
-      const anchorIndex = allVisibleTasks.findIndex(t => t.id === anchorTaskId);
-      const currentIndex = allVisibleTasks.findIndex(t => t.id === taskId);
-      
-      if (anchorIndex !== -1 && currentIndex !== -1) {
-        const startIndex = Math.min(anchorIndex, currentIndex);
-        const endIndex = Math.max(anchorIndex, currentIndex);
-        let rangeTaskIds = allVisibleTasks
-          .slice(startIndex, endIndex + 1)
-          .map(t => t.id);
-        
-        // Expand any template IDs in the range to include all their instances
-        const expandedRangeTaskIds = [...rangeTaskIds];
-        rangeTaskIds.forEach(taskId => {
-          // Check if this task ID is a template
-          const isTemplateInRange = recurringTemplates.find(t => t.id === taskId);
-          if (isTemplateInRange) {
-            // Get all instances for this template
-            const templateInstances = instances
-              .filter(inst => inst.templateId === taskId)
-              .map(inst => inst.id);
-            // Add instances to the selection
-            expandedRangeTaskIds.push(...templateInstances);
-          }
-        });
-        
-        // Remove duplicates and set selection
-        const finalSelection = [...new Set(expandedRangeTaskIds)];
-        
-        // Replace selection with the new range (macOS-like behavior)
-        setSelectedTasks(finalSelection);
-        
-        // Don't update anchor on shift+click - anchor stays fixed
-        return;
-      }
-    }
-    
-    // If shift+click but no anchor exists yet, treat as regular click to set anchor
-    if (event?.shiftKey && !anchorTaskId) {
-      // No anchor yet, so set this as the anchor
-      setAnchorTaskId(taskId);
-      
-      // If this is a template, select template and all its instances
-      if (isTemplate) {
-        const templateInstances = instances
-          .filter(inst => inst.templateId === taskId)
-          .map(inst => inst.id);
-        setSelectedTasks([taskId, ...templateInstances]);
-      } else {
-        // Regular task - select just this item
-        setSelectedTasks([taskId]);
-      }
-      return;
-    }
-    
-    // If this is a recurring template header being checked, select all its instances too
-    if (isTemplate && !wasSelected) {
-      // Template is being selected - also select all its instances
-      const templateInstances = instances
-        .filter(inst => inst.templateId === taskId)
-        .map(inst => inst.id);
-      
-      const isCtrlOrCmd = event?.ctrlKey || event?.metaKey;
-      
-      if (!isCtrlOrCmd) {
-        // Normal click: replace selection with template and its instances
-        setSelectedTasks([taskId, ...templateInstances]);
-      } else {
-        // Ctrl/Cmd+click: add template and instances to existing selection
-        setSelectedTasks(prev => {
-          const newSelection = [...prev, taskId, ...templateInstances];
-          // Remove duplicates
-          return [...new Set(newSelection)];
-        });
-      }
-      
-      // Set anchor point on regular click
-      setAnchorTaskId(taskId);
-      return;
-    }
-    
-    // If this is a recurring template header being unchecked, deselect all its instances too
-    if (isTemplate && wasSelected) {
-      // Template is being deselected - also deselect all its instances
-      const templateInstances = instances
-        .filter(inst => inst.templateId === taskId)
-        .map(inst => inst.id);
-      
-      setSelectedTasks(prev => {
-        return prev.filter(id => id !== taskId && !templateInstances.includes(id));
-      });
-      
-      // Reset anchor point when deselecting
-      setAnchorTaskId(null);
-      return;
-    }
-    
-    // Normal click (no shift, no ctrl/cmd) - macOS-like behavior
-    // Replace selection with just the clicked item, or deselect if it's the only selected item
-    const isCtrlOrCmd = event?.ctrlKey || event?.metaKey;
-    
-    if (!isCtrlOrCmd) {
-      // Normal click: replace selection with just this item
-      // If it's already the only selected item, deselect it (toggle off)
-      setSelectedTasks(prev => {
-        if (prev.length === 1 && prev[0] === taskId) {
-          // Already the only selected item - deselect it
-          return [];
-        } else {
-          // Replace selection with just this item
-          return [taskId];
-        }
-      });
-      
-      // Set anchor point on regular click (macOS-like behavior)
-      setAnchorTaskId(taskId);
-    } else {
-      // Ctrl/Cmd+click: toggle individual item (multi-select)
-      setSelectedTasks(prev => {
-        if (prev.includes(taskId)) {
-          return prev.filter(id => id !== taskId);
-        } else {
-          return [...prev, taskId];
-        }
-      });
-      
-      // Set anchor point on Ctrl/Cmd+click as well
-      setAnchorTaskId(taskId);
-    }
-  }, [anchorTaskId, getAllVisibleTasksInOrder, recurringTemplates, instances, selectedTasks]);
+  // ---------------------------------------------------------------------------
+  // Selection
+  // ---------------------------------------------------------------------------
 
-  // Get unique projects for filter dropdown
+  const {
+    selectedTasks,
+    selectedTaskIds,
+    handleTaskSelection,
+    selectAll: handleSelectAll,
+    clearSelection: handleClearSelections
+  } = useTaskSelection({
+    getVisibleTasksInOrder: getAllVisibleTasksInOrder,
+    recurringTemplates,
+    instances,
+    selectableIds: selectableTaskIds
+  });
+
+  // Header checkbox compares against the visible/selectable ids (C10)
+  const allVisibleSelected = useMemo(() => {
+    if (selectableTaskIds.size === 0) return false;
+    for (const id of selectableTaskIds) {
+      if (!selectedTaskIds.has(id)) return false;
+    }
+    return true;
+  }, [selectableTaskIds, selectedTaskIds]);
+
+  const areAllSelectedComplete = useMemo(() => {
+    if (selectedTasks.length === 0) return false;
+    const selectedTasksData = tasks.filter(t => selectedTaskIds.has(t.id));
+    return selectedTasksData.length > 0 && selectedTasksData.every(t => t.completed === true);
+  }, [selectedTasks, selectedTaskIds, tasks]);
+
+  const areAllSelectedUrgent = useMemo(() => {
+    if (selectedTasks.length === 0) return false;
+    const selectedTasksData = tasks.filter(t => selectedTaskIds.has(t.id));
+    return selectedTasksData.length > 0 &&
+      selectedTasksData.every(t => (t.priority || t.Priority || 'Normal') === 'Urgent');
+  }, [selectedTasks, selectedTaskIds, tasks]);
+
+  // ---------------------------------------------------------------------------
+  // Bulk actions
+  // ---------------------------------------------------------------------------
+
+  const handleBulkToggleComplete = useCallback(() => {
+    const tasksToUpdate = tasks.filter(t => selectedTaskIds.has(t.id));
+    if (tasksToUpdate.length === 0) return;
+    const allComplete = areAllSelectedComplete;
+    handleClearSelections();
+
+    // Single batch update - taskManager applies the optimistic update (C3, C8)
+    taskManager.batchUpdate(
+      tasksToUpdate.map(task => ({ id: task.id, updates: { completed: !allComplete } }))
+    ).catch(e => {
+      console.error('Bulk complete error:', e);
+      alert(`Failed to ${allComplete ? 'unmark' : 'mark'} some tasks: ${e.message}`);
+    });
+  }, [tasks, selectedTaskIds, areAllSelectedComplete, handleClearSelections]);
+
+  const handleBulkToggleUrgent = useCallback(() => {
+    const tasksToUpdate = tasks.filter(t => selectedTaskIds.has(t.id));
+    if (tasksToUpdate.length === 0) return;
+    const allUrgent = areAllSelectedUrgent;
+    handleClearSelections();
+
+    taskManager.batchUpdate(
+      tasksToUpdate.map(task => ({
+        id: task.id,
+        updates: { priority: allUrgent ? 'Normal' : 'Urgent' }
+      }))
+    ).catch(e => {
+      console.error('Bulk priority error:', e);
+      if (e.failedTasks && e.successfulTasks) {
+        alert(`Updated ${e.successfulTasks.length} task${e.successfulTasks.length !== 1 ? 's' : ''}, but ${e.failedTasks.length} failed. Please refresh and try again.`);
+      } else {
+        alert(`Failed to toggle priority for some tasks: ${e.message || 'Please try again.'}`);
+      }
+    });
+  }, [tasks, selectedTaskIds, areAllSelectedUrgent, handleClearSelections]);
+
+  const openBulkDeleteModal = useCallback(() => {
+    const tasksToDelete = tasks.filter(t => selectedTaskIds.has(t.id));
+    if (tasksToDelete.length === 0) return;
+
+    setBulkDeleteModal({
+      isOpen: true,
+      mode: 'selected-tasks',
+      taskIds: tasksToDelete.map(t => t.id),
+      items: tasksToDelete.map(formatTaskForModal),
+      title: `Delete ${tasksToDelete.length} Task${tasksToDelete.length !== 1 ? 's' : ''}`,
+      message: `This will permanently delete ${tasksToDelete.length} selected task${tasksToDelete.length !== 1 ? 's' : ''}. This action cannot be undone.`,
+      confirmLabel: 'Delete'
+    });
+  }, [tasks, selectedTaskIds, formatTaskForModal]);
+
+  const handleBulkDeleteConfirm = useCallback(async () => {
+    const modalData = bulkDeleteModal;
+    closeBulkDeleteModal();
+
+    if (modalData.mode !== 'selected-tasks' || !modalData.taskIds || modalData.taskIds.length === 0) {
+      return;
+    }
+
+    handleClearSelections();
+
+    try {
+      const result = await runBulkDelete(modalData.taskIds, {
+        performedBy: userProfile?.displayName || userProfile?.email || 'Unknown'
+      });
+      if (result.errors > 0) {
+        alert(`Deleted ${result.success} task${result.success !== 1 ? 's' : ''} successfully. ${result.errors} task${result.errors !== 1 ? 's' : ''} failed to delete.`);
+      }
+    } catch (error) {
+      console.error('Database: Bulk delete error:', error);
+      alert(`Failed to delete some tasks: ${error.message}`);
+    }
+  }, [bulkDeleteModal, closeBulkDeleteModal, handleClearSelections, userProfile]);
+
+  // ---------------------------------------------------------------------------
+  // Misc derived values
+  // ---------------------------------------------------------------------------
+
   const uniqueProjects = useMemo(() => {
     const projects = [...new Set(tasks.map(task => task.project).filter(Boolean))];
     return projects.sort();
   }, [tasks]);
 
-  // Handle sort field change
   const handleSort = useCallback((field) => {
     if (sortField === field) {
       setSortDirection(sortDirection === 'asc' ? 'desc' : 'asc');
@@ -2395,12 +606,19 @@ function Database() {
     }
   }, [sortField, sortDirection]);
 
-  // Convert selectedTasks array to Set for RecurringTaskRow
-  const selectedTaskIds = useMemo(() => {
-    return new Set(selectedTasks);
-  }, [selectedTasks]);
+  const editableCellProps = {
+    editingCell,
+    editInputRef,
+    editValueRef,
+    saveEdit,
+    startEditing,
+    cancelEditing,
+    moveToNextCell,
+    savingFields,
+    savedFields
+  };
 
-  if (showInitialLoader) {
+  if (isLoading && tasks.length === 0) {
     return (
       <div className="flex items-center justify-center h-64">
         <div className="text-center">
@@ -2493,7 +711,7 @@ function Database() {
                 <th className="px-4 py-3 text-left">
                   <input
                     type="checkbox"
-                    checked={selectedTasks.length === tasks.length && tasks.length > 0}
+                    checked={allVisibleSelected}
                     onChange={(e) => {
                       e.stopPropagation();
                       if (e.target.checked) {
@@ -2505,121 +723,36 @@ function Database() {
                     className="w-4 h-4 text-blue-600 bg-gray-100 border-gray-300 dark:bg-gray-700 dark:border-gray-600 rounded focus:ring-blue-500 cursor-pointer"
                   />
                 </th>
-                <th 
-                  className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-700"
-                  onClick={(e) => {
-                    // If clicking on chevron icon, sort; otherwise select all
-                    if (e.target.closest('svg')) {
-                      handleSort('task');
-                    } else {
-                      handleSelectAll();
-                    }
-                  }}
-                >
-                  <div className="flex items-center gap-1">
-                    Task
-                    {sortField === 'task' && (
-                      <span onClick={(e) => { e.stopPropagation(); handleSort('task'); }} className="cursor-pointer">
-                        {sortDirection === 'asc' ? <ChevronUpIcon className="w-3 h-3" /> : <ChevronDownIcon className="w-3 h-3" />}
-                      </span>
-                    )}
-                  </div>
-                </th>
-                <th 
-                  className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-700"
-                  onClick={(e) => {
-                    if (e.target.closest('svg')) {
-                      handleSort('project');
-                    } else {
-                      handleSelectAll();
-                    }
-                  }}
-                >
-                  <div className="flex items-center gap-1">
-                    Project
-                    {sortField === 'project' && (
-                      <span onClick={(e) => { e.stopPropagation(); handleSort('project'); }} className="cursor-pointer">
-                        {sortDirection === 'asc' ? <ChevronUpIcon className="w-3 h-3" /> : <ChevronDownIcon className="w-3 h-3" />}
-                      </span>
-                    )}
-                  </div>
-                </th>
-                <th 
-                  className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-700"
-                  onClick={(e) => {
-                    if (e.target.closest('svg')) {
-                      handleSort('deadline');
-                    } else {
-                      handleSelectAll();
-                    }
-                  }}
-                >
-                  <div className="flex items-center gap-1">
-                    Deadline
-                    {sortField === 'deadline' && (
-                      <span onClick={(e) => { e.stopPropagation(); handleSort('deadline'); }} className="cursor-pointer">
-                        {sortDirection === 'asc' ? <ChevronUpIcon className="w-3 h-3" /> : <ChevronDownIcon className="w-3 h-3" />}
-                      </span>
-                    )}
-                  </div>
-                </th>
-                <th 
-                  className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-700"
-                  onClick={(e) => {
-                    if (e.target.closest('svg')) {
-                      handleSort('responsibleParty');
-                    } else {
-                      handleSelectAll();
-                    }
-                  }}
-                >
-                  <div className="flex items-center gap-1">
-                    Responsible Party
-                    {sortField === 'responsibleParty' && (
-                      <span onClick={(e) => { e.stopPropagation(); handleSort('responsibleParty'); }} className="cursor-pointer">
-                        {sortDirection === 'asc' ? <ChevronUpIcon className="w-3 h-3" /> : <ChevronDownIcon className="w-3 h-3" />}
-                      </span>
-                    )}
-                  </div>
-                </th>
-                <th 
-                  className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-700"
-                  onClick={(e) => {
-                    if (e.target.closest('svg')) {
-                      handleSort('priority');
-                    } else {
-                      handleSelectAll();
-                    }
-                  }}
-                >
-                  <div className="flex items-center gap-1">
-                    Priority
-                    {sortField === 'priority' && (
-                      <span onClick={(e) => { e.stopPropagation(); handleSort('priority'); }} className="cursor-pointer">
-                        {sortDirection === 'asc' ? <ChevronUpIcon className="w-3 h-3" /> : <ChevronDownIcon className="w-3 h-3" />}
-                      </span>
-                    )}
-                  </div>
-                </th>
-                <th 
-                  className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-700"
-                  onClick={(e) => {
-                    if (e.target.closest('svg')) {
-                      handleSort('completed');
-                    } else {
-                      handleSelectAll();
-                    }
-                  }}
-                >
-                  <div className="flex items-center gap-1">
-                    Status
-                    {sortField === 'completed' && (
-                      <span onClick={(e) => { e.stopPropagation(); handleSort('completed'); }} className="cursor-pointer">
-                        {sortDirection === 'asc' ? <ChevronUpIcon className="w-3 h-3" /> : <ChevronDownIcon className="w-3 h-3" />}
-                      </span>
-                    )}
-                  </div>
-                </th>
+                {[
+                  { field: 'task', label: 'Task' },
+                  { field: 'project', label: 'Project' },
+                  { field: 'deadline', label: 'Deadline' },
+                  { field: 'responsibleParty', label: 'Responsible Party' },
+                  { field: 'priority', label: 'Priority' },
+                  { field: 'completed', label: 'Status' }
+                ].map(({ field, label }) => (
+                  <th 
+                    key={field}
+                    className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-700"
+                    onClick={(e) => {
+                      // If clicking on chevron icon, sort; otherwise select all
+                      if (e.target.closest('svg')) {
+                        handleSort(field);
+                      } else {
+                        handleSelectAll();
+                      }
+                    }}
+                  >
+                    <div className="flex items-center gap-1">
+                      {label}
+                      {sortField === field && (
+                        <span onClick={(e) => { e.stopPropagation(); handleSort(field); }} className="cursor-pointer">
+                          {sortDirection === 'asc' ? <ChevronUpIcon className="w-3 h-3" /> : <ChevronDownIcon className="w-3 h-3" />}
+                        </span>
+                      )}
+                    </div>
+                  </th>
+                ))}
                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                   Recurrence
                 </th>
@@ -2636,34 +769,21 @@ function Database() {
                   template={template}
                   tasks={allTasksForRecurring}
                   enterpriseUsers={enterpriseUsers}
-                  editingCell={editingCell}
-                  editInputRef={editInputRef}
-                  editValueRef={editValueRef}
-                  saveEdit={saveEdit}
-                  startEditing={startEditing}
                   updateTask={updateTask}
                   deleteTask={deleteTask}
                   selectedTaskIds={selectedTaskIds}
                   toggleSelection={handleTaskSelection}
                   saving={saving}
-                  calculateStatus={calculateStatus}
-                  EditableCell={EditableCell}
-                  MultiResponsiblePartySelector={MultiResponsiblePartySelector}
-                  createTask={createTask}
-                  loadTasks={loadTasks}
                   isExpanded={expandedRecurringTasks.has(template.id)}
                   onExpandedChange={handleExpandedChange}
                   onNoteSave={handleNoteSave}
-                  getResponsiblePartyNames={getResponsiblePartyNames}
-                  moveToNextCell={moveToNextCell}
-                  savingFields={savingFields}
-                  savedFields={savedFields}
+                  {...editableCellProps}
                 />
               ))}
               
               {/* Regular Solo Tasks */}
               {sortedAndFilteredRegularTasks.map((task) => {
-                const status = calculateStatus(task);
+                const status = getTaskStatus(task);
                 const isSelected = selectedTaskIds.has(task.id);
                 const isSaving = saving.has(task.id);
                 
@@ -2675,16 +795,12 @@ function Database() {
                       const target = e.target;
                       const tagName = target.tagName.toLowerCase();
                       
-                      // Prevent clicks on interactive elements
                       const isInput = tagName === 'input' || target.closest('input');
                       const isButton = tagName === 'button' || target.closest('button');
                       const isSelect = tagName === 'select' || target.closest('select');
-                      // Check if clicking on EditableCell (has cursor-pointer class and is clickable for editing)
                       const editableCellSpan = target.closest('span.cursor-pointer');
                       const isEditableCell = editableCellSpan && editableCellSpan.classList.contains('cursor-pointer');
                       
-                      // Allow clicking on empty td space or non-interactive elements within td
-                      // This allows clicking between columns to select the row
                       if (!isInput && !isButton && !isSelect && !isEditableCell) {
                         // Prevent text selection on shift+click
                         if (e.shiftKey) {
@@ -2713,31 +829,15 @@ function Database() {
                         task={task} 
                         field="task" 
                         className="text-sm font-medium"
-                        editingCell={editingCell}
-                        enterpriseUsers={enterpriseUsers}
-                        editInputRef={editInputRef}
-                        editValueRef={editValueRef}
-                        saveEdit={saveEdit}
-                        startEditing={startEditing}
-                        moveToNextCell={moveToNextCell}
-                        savingFields={savingFields}
-                        savedFields={savedFields}
+                        {...editableCellProps}
                       />
                     </td>
-                    <td className="px-4 py-4" key={`project-${task.id}-${task.project || task.Project || ''}`}>
+                    <td className="px-4 py-4">
                       <EditableCell 
                         task={task} 
                         field="project" 
                         className="text-sm"
-                        editingCell={editingCell}
-                        enterpriseUsers={enterpriseUsers}
-                        editInputRef={editInputRef}
-                        editValueRef={editValueRef}
-                        saveEdit={saveEdit}
-                        startEditing={startEditing}
-                        moveToNextCell={moveToNextCell}
-                        savingFields={savingFields}
-                        savedFields={savedFields}
+                        {...editableCellProps}
                       />
                     </td>
                     <td className="px-4 py-4">
@@ -2746,15 +846,7 @@ function Database() {
                         field="deadline" 
                         type="date"
                         className="text-sm"
-                        editingCell={editingCell}
-                        enterpriseUsers={enterpriseUsers}
-                        editInputRef={editInputRef}
-                        editValueRef={editValueRef}
-                        saveEdit={saveEdit}
-                        startEditing={startEditing}
-                        moveToNextCell={moveToNextCell}
-                        savingFields={savingFields}
-                        savedFields={savedFields}
+                        {...editableCellProps}
                       />
                     </td>
                     <td className="px-4 py-4">
@@ -2779,7 +871,7 @@ function Database() {
                     </td>
                     <td className="px-4 py-4">
                       <span className={`inline-flex px-3 py-1 text-xs font-semibold rounded-full ${
-                        status === 'Complete'
+                        status === 'Completed'
                           ? 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-300'
                           : status === 'Overdue'
                             ? 'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-300'
@@ -2793,10 +885,7 @@ function Database() {
                     <td className="px-4 py-4">
                       {task.recurrence ? (
                         <span className="text-xs text-gray-700 dark:text-gray-300 font-medium">
-                          {(() => {
-                            const instanceCount = allTasksForRecurring.filter(t => t.templateId === task.id).length;
-                            return `${instanceCount} instances`;
-                          })()}
+                          {`${allTasksForRecurring.filter(t => t.templateId === task.id).length} instances`}
                         </span>
                       ) : (
                         <button
@@ -2875,7 +964,6 @@ function Database() {
           onClose={() => {
             setShowRecurrenceModal(false);
             setTaskForRecurrence(null);
-            setNewTaskRecurrence(null);
           }}
           onDone={handleRecurrenceDone}
           initialTask={taskForRecurrence}
@@ -2924,7 +1012,6 @@ function Database() {
         onClose={() => setShowImportHistory(false)}
       />
 
-
       {/* Floating Bulk Actions Panel */}
       {selectedTasks.length > 0 && (
         <div className="fixed right-4 top-20 z-50 animate-in slide-in-from-right duration-200">
@@ -2944,120 +1031,33 @@ function Database() {
             <div className="flex flex-col gap-2">
               {/* Complete/Incomplete Button */}
               <button
-                onClick={async () => {
-                  const tasksToUpdate = tasks.filter(t => selectedTasks.includes(t.id));
-                  // If all tasks are selected, check all tasks; otherwise check selected tasks
-                  const allComplete = selectedTasks.length === tasks.length && tasks.length > 0
-                    ? areAllTasksComplete()
-                    : areAllSelectedComplete();
-                  
-                  // Optimistic update - update UI immediately
-                  setTasks(prevTasks => prevTasks.map(t => 
-                    selectedTasks.includes(t.id) ? { ...t, completed: !allComplete } : t
-                  ));
-                  tasksToUpdate.forEach(task => {
-                    // Use TaskManager
-                    taskManager.updateTask(task.id, { completed: !allComplete }).catch(e => console.error(e));
-                  });
-                  setSelectedTasks([]);
-                  
-                  // TaskManager handles updates via events
-                  taskManager.batchUpdate(
-                    tasksToUpdate.map(task => ({ id: task.id, updates: { completed: !allComplete } }))
-                  ).catch(e => {
-                    console.error('Bulk complete error:', e);
-                    alert(`Failed to ${allComplete ? 'unmark' : 'mark'} some tasks: ${e.message}`);
-                  });
-                }}
+                onClick={handleBulkToggleComplete}
                 className={`flex items-center justify-center gap-2 px-4 py-2 rounded-lg font-medium transition-colors duration-200 ${
-                  (selectedTasks.length === tasks.length && tasks.length > 0
-                    ? areAllTasksComplete()
-                    : areAllSelectedComplete())
+                  areAllSelectedComplete
                     ? 'bg-gray-500 hover:bg-gray-600 text-white' 
                     : 'bg-green-600 hover:bg-green-700 text-white'
                 }`}
               >
                 <CheckIcon className="w-4 h-4" />
-                {(selectedTasks.length === tasks.length && tasks.length > 0
-                  ? areAllTasksComplete()
-                  : areAllSelectedComplete())
-                  ? 'Mark Incomplete' : 'Mark Complete'}
+                {areAllSelectedComplete ? 'Mark Incomplete' : 'Mark Complete'}
               </button>
               
               {/* Urgent/Normal Button */}
               <button
-                onClick={async () => {
-                  const tasksToUpdate = tasks.filter(t => selectedTasks.includes(t.id));
-                  // If all tasks are selected, check all tasks; otherwise check selected tasks
-                  const allUrgent = selectedTasks.length === tasks.length && tasks.length > 0
-                    ? areAllTasksUrgent()
-                    : areAllSelectedUrgent();
-                  
-                  // Helper function to safely get priority (handle undefined/null)
-                  const getPriority = (task) => {
-                    const priority = task.priority || task.Priority || 'Normal';
-                    return priority === 'Urgent' ? 'Urgent' : 'Normal';
-                  };
-                  
-                  // Optimistic update - update UI immediately
-                  setTasks(prevTasks => prevTasks.map(t => {
-                    if (selectedTasks.includes(t.id)) {
-                      return { ...t, priority: allUrgent ? 'Normal' : 'Urgent' };
-                    }
-                    return t;
-                  }));
-                  
-                  setSelectedTasks([]);
-                  
-                  // Use TaskManager batch update
-                  taskManager.batchUpdate(
-                    tasksToUpdate.map(task => ({
-                      id: task.id,
-                      updates: { priority: allUrgent ? 'Normal' : 'Urgent' }
-                    }))
-                  ).catch(e => {
-                    console.error('Bulk priority error:', e);
-                    // Show detailed error message if available
-                    if (e.failedTasks && e.successfulTasks) {
-                      alert(`Updated ${e.successfulTasks.length} task${e.successfulTasks.length !== 1 ? 's' : ''}, but ${e.failedTasks.length} failed. Please refresh and try again.`);
-                    } else {
-                      alert(`Failed to toggle priority for some tasks: ${e.message || 'Please try again.'}`);
-                    }
-                  });
-                }}
+                onClick={handleBulkToggleUrgent}
                 className={`flex items-center justify-center gap-2 px-4 py-2 rounded-lg font-medium transition-colors duration-200 ${
-                  (selectedTasks.length === tasks.length && tasks.length > 0
-                    ? areAllTasksUrgent()
-                    : areAllSelectedUrgent())
+                  areAllSelectedUrgent
                     ? 'bg-blue-600 hover:bg-blue-700 text-white'
                     : 'bg-orange-600 hover:bg-orange-700 text-white'
                 }`}
               >
                 <ClockIcon className="w-4 h-4" />
-                {(selectedTasks.length === tasks.length && tasks.length > 0
-                  ? areAllTasksUrgent()
-                  : areAllSelectedUrgent())
-                  ? 'Mark Normal' : 'Mark Urgent'}
+                {areAllSelectedUrgent ? 'Mark Normal' : 'Mark Urgent'}
               </button>
               
               {/* Delete Button */}
               <button
-                onClick={() => {
-                  const tasksToDelete = tasks.filter(t => selectedTasks.includes(t.id));
-                  if (tasksToDelete.length === 0) {
-                    return;
-                  }
-
-                  setBulkDeleteModal({
-                    isOpen: true,
-                    mode: 'selected-tasks',
-                    taskIds: tasksToDelete.map(t => t.id),
-                    items: tasksToDelete.map(formatTaskForModal),
-                    title: `Delete ${tasksToDelete.length} Task${tasksToDelete.length !== 1 ? 's' : ''}`,
-                    message: `This will permanently delete ${tasksToDelete.length} selected task${tasksToDelete.length !== 1 ? '' : 's'}. This action cannot be undone.`,
-                    confirmLabel: 'Delete'
-                  });
-                }}
+                onClick={openBulkDeleteModal}
                 className="flex items-center justify-center gap-2 px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg font-medium transition-colors duration-200"
               >
                 <TrashIcon className="w-4 h-4" />

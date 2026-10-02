@@ -1,5 +1,5 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
-import { format, parse, isValid, differenceInDays, startOfYear, endOfYear, startOfWeek, endOfWeek, startOfMonth, endOfMonth, isWithinInterval, parseISO } from 'date-fns';
+import React, { useState, useMemo, useCallback } from 'react';
+import { format, startOfYear, endOfYear, startOfWeek, endOfWeek, startOfMonth, endOfMonth, isWithinInterval } from 'date-fns';
 import {
   ChartBarIcon,
   UserIcon,
@@ -10,164 +10,22 @@ import {
   CheckCircleIcon,
   ExclamationTriangleIcon,
   ArrowTrendingUpIcon,
-  ArrowTrendingDownIcon,
   SparklesIcon
 } from '@heroicons/react/24/outline';
-import { taskManager } from './services/taskManager';
-import { microsoftDataService } from './microsoftDataService';
-import { filterDeadlineTasks } from './utils/taskHelpers';
+import { filterDeadlineTasks, parseDeadlineDate, isTaskCompleted, getTaskDepartments } from './utils/taskHelpers';
+import { useTasks } from './hooks/useTasks';
+import { useUsers } from './hooks/useUsers';
 
 function DataPage() {
-  const [tasks, setTasks] = useState([]);
-  const [users, setUsers] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const { tasks: allTasks, isLoading: loading } = useTasks();
+  const { users } = useUsers();
   const [selectedYear, setSelectedYear] = useState(new Date().getFullYear());
 
-  // Load tasks from TaskManager
-  const loadTasks = useCallback(async (forceRefresh = false) => {
-    try {
-      setLoading(true);
-      
-      // Initialize TaskManager if not already initialized or if a force refresh is requested
-      if (forceRefresh || !taskManager.isInitialized) {
-        await taskManager.initialize(forceRefresh);
-      }
-      
-      // Get tasks from TaskManager (from memory, no API call)
-      const allTasks = taskManager.getAllTasks();
-      
-      // Filter out recurring templates - only show actual deadline instances
-      const deadlineTasks = filterDeadlineTasks(Array.isArray(allTasks) ? allTasks : []);
-      setTasks(deadlineTasks);
-    } catch (error) {
-      console.error('DataPage: Error loading tasks:', error);
-      setTasks([]);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  // Load users
-  useEffect(() => {
-    const loadUsers = async () => {
-      try {
-        const usersData = await microsoftDataService.users.getEnterpriseUsers();
-        
-        // Merge enterprise users with local assignments (same as Dashboard)
-        const USER_ASSIGNMENTS_KEY = 'user_assignments';
-        const localAssignments = JSON.parse(localStorage.getItem(USER_ASSIGNMENTS_KEY) || '{}');
-        
-        const usersWithAssignments = (Array.isArray(usersData) ? usersData : []).map(user => ({
-          ...user,
-          departments: localAssignments[user.id]?.departments || [],
-          role: localAssignments[user.id]?.role || 'VIEWER'
-        }));
-        
-        setUsers(usersWithAssignments);
-      } catch (err) {
-        console.error('DataPage: Error loading users:', err);
-        setUsers([]);
-      }
-    };
-    
-    loadUsers();
-    
-    // Listen for department/role changes and refresh users in background
-    const handleUserChange = async () => {
-      console.log('DataPage: User departments/roles changed, refreshing users...');
-      try {
-        const usersData = await microsoftDataService.users.getEnterpriseUsers();
-        const USER_ASSIGNMENTS_KEY = 'user_assignments';
-        const localAssignments = JSON.parse(localStorage.getItem(USER_ASSIGNMENTS_KEY) || '{}');
-        const usersWithAssignments = (Array.isArray(usersData) ? usersData : []).map(user => ({
-          ...user,
-          departments: localAssignments[user.id]?.departments || [],
-          role: localAssignments[user.id]?.role || 'VIEWER'
-        }));
-        setUsers(usersWithAssignments);
-      } catch (err) {
-        console.error('DataPage: Error refreshing users:', err);
-      }
-    };
-
-    window.addEventListener('userDepartmentsChanged', handleUserChange);
-    window.addEventListener('userRoleChanged', handleUserChange);
-    
-    return () => {
-      window.removeEventListener('userDepartmentsChanged', handleUserChange);
-      window.removeEventListener('userRoleChanged', handleUserChange);
-    };
-  }, []);
-
-  // Load tasks and subscribe to TaskManager events
-  useEffect(() => {
-    loadTasks(true);
-    
-    // Subscribe to TaskManager events for instant updates
-    const unsubscribe = taskManager.subscribe(({ type, tasks: updatedTasks, task, taskId, ...data }) => {
-      if (type === 'refreshed' || type === 'created' || type === 'updated' || type === 'deleted' || type === 'batchCreated' || type === 'batchUpdated' || type === 'batchDeleted') {
-        // Reload tasks from TaskManager
-        const allTasks = taskManager.getAllTasks();
-        const deadlineTasks = filterDeadlineTasks(Array.isArray(allTasks) ? allTasks : []);
-        setTasks(deadlineTasks);
-      }
-      
-      if (type === 'loading') {
-        setLoading(data.isLoading);
-      }
-    });
-    
-    // Also listen to DOM events for cross-component communication
-    const handleTaskDataChanged = (event) => {
-      const { type } = event.detail;
-      if (type === 'refreshed' || type === 'created' || type === 'updated' || type === 'deleted' || type === 'batchCreated' || type === 'batchUpdated' || type === 'batchDeleted') {
-        const allTasks = taskManager.getAllTasks();
-        const deadlineTasks = filterDeadlineTasks(Array.isArray(allTasks) ? allTasks : []);
-        setTasks(deadlineTasks);
-      }
-    };
-    
-    window.addEventListener('taskDataChanged', handleTaskDataChanged);
-    
-    return () => {
-      unsubscribe();
-      window.removeEventListener('taskDataChanged', handleTaskDataChanged);
-    };
-  }, [loadTasks]);
-
-  // Helper function to parse deadline dates
-  const parseDeadlineDate = (dateStr) => {
-    if (!dateStr) return null;
-    try {
-      // Parse date string carefully to avoid timezone issues
-      // If in yyyy-MM-dd format, parse components directly
-      if (typeof dateStr === 'string' && dateStr.includes('-')) {
-        const datePart = dateStr.split('T')[0]; // Get just the date part
-        const parts = datePart.split('-');
-        if (parts.length === 3) {
-          const year = parseInt(parts[0], 10);
-          const month = parseInt(parts[1], 10) - 1; // JS months are 0-indexed
-          const day = parseInt(parts[2], 10);
-          
-          if (!isNaN(year) && !isNaN(month) && !isNaN(day)) {
-            // Create date at noon local time to avoid timezone shifts
-            return new Date(year, month, day, 12, 0, 0);
-          }
-        }
-      }
-      
-      // Fallback to date-fns parsing for other formats
-      const parsed = parseISO(dateStr);
-      if (isValid(parsed)) {
-        parsed.setHours(12, 0, 0, 0);
-        return parsed;
-      }
-      
-      return null;
-    } catch {
-      return null;
-    }
-  };
+  // Only show actual deadline instances (no recurring templates)
+  const tasks = useMemo(
+    () => filterDeadlineTasks(Array.isArray(allTasks) ? allTasks : []),
+    [allTasks]
+  );
 
   // Get tasks for a specific year (or all time if 'all')
   const getYearTasks = useCallback((year) => {
@@ -203,12 +61,8 @@ function DataPage() {
     const thisMonthStart = startOfMonth(new Date());
     const thisMonthEnd = endOfMonth(new Date());
 
-    // Helper to check completion
-    const isCompleted = (task) => 
-      task.completed === true || task.completed === 'Yes' || 
-      task.completed === 'yes' || task.Completed_x003f_ === true || 
-      task.Completed_x003f_ === 'Yes' || task.Completed_x003f_ === 'yes' || 
-      task.Completed === true || task.Completed === 'Yes' || task.Completed === 'yes';
+    // Helper to check completion (canonical helper, C4/A2)
+    const isCompleted = isTaskCompleted;
 
     // Total counts
     const totalTasksAllTime = tasks.length;
@@ -242,18 +96,8 @@ function DataPage() {
     });
 
 
-    // Department metrics - use same logic as Dashboard
-    const USER_ASSIGNMENTS_KEY = 'user_assignments';
-    let localAssignments = {};
-    try {
-      const stored = localStorage.getItem(USER_ASSIGNMENTS_KEY);
-      if (stored) {
-        localAssignments = JSON.parse(stored);
-      }
-    } catch (error) {
-      console.error('DataPage: Error loading user assignments:', error);
-    }
-
+    // Department metrics - departments come from the users list (merged with
+    // API assignments by useUsers), not localStorage (S4)
     const DEPARTMENTS = {
       DEVELOPMENT: 'development',
       ACCOUNTING: 'accounting', 
@@ -281,45 +125,9 @@ function DataPage() {
     
     if (users && users.length > 0) {
       selectedYearTasks.forEach(task => {
-        const responsibleParty = task.responsibleParty || task.ResponsibleParty || '';
-        
-        // Find all users assigned to this task (same logic as Dashboard)
-        const assignedUsers = users.filter(user => {
-          const userEmail = user.email || user.Email || user.mail || user.userPrincipalName || '';
-          const userDisplayName = user.displayName || user.DisplayName || '';
-          
-          let responsiblePartyStr = '';
-          if (typeof responsibleParty === 'string') {
-            responsiblePartyStr = responsibleParty;
-          } else if (Array.isArray(responsibleParty)) {
-            responsiblePartyStr = responsibleParty.map(item => {
-              if (typeof item === 'object' && item.LookupValue) {
-                return item.LookupValue;
-              }
-              if (typeof item === 'object' && item.Email) {
-                return item.Email;
-              }
-              return String(item);
-            }).join('; ');
-          } else if (responsibleParty && typeof responsibleParty === 'object') {
-            responsiblePartyStr = responsibleParty.LookupValue || responsibleParty.Email || String(responsibleParty);
-          } else {
-            responsiblePartyStr = String(responsibleParty || '');
-          }
-          
-          return responsiblePartyStr && responsiblePartyStr.trim() !== '' && 
-                 (responsiblePartyStr.includes(userEmail) || responsiblePartyStr.includes(userDisplayName));
-        });
-        
-        // Collect all unique departments from all assigned users
-        const taskDepartments = new Set();
-        assignedUsers.forEach(assignedUser => {
-          const userDepartments = assignedUser.departments || [];
-          userDepartments.forEach(department => {
-            taskDepartments.add(department);
-          });
-        });
-        
+        // Shared department resolution (A2)
+        const taskDepartments = getTaskDepartments(task, users);
+
         // Determine completion status
         const isCompletedTask = isCompleted(task);
         
@@ -357,58 +165,57 @@ function DataPage() {
       };
     });
 
-    // User metrics
-    const userMetrics = users.map(user => {
-      const userEmail = user.mail || user.userPrincipalName || user.email || user.Email;
-      const userDisplayName = user.displayName || user.displayName || user.DisplayName || userEmail;
-      
-      const userTasks = selectedYearTasks.filter(task => {
-        const responsibleParty = task.responsibleParty || task.ResponsibleParty || '';
-        if (!responsibleParty) return false;
-        
-        let responsiblePartyStr = '';
-        if (typeof responsibleParty === 'string') {
-          responsiblePartyStr = responsibleParty;
-        } else if (Array.isArray(responsibleParty)) {
-          responsiblePartyStr = responsibleParty.map(item => {
-            if (typeof item === 'object' && item.LookupValue) return item.LookupValue;
-            if (typeof item === 'object' && item.Email) return item.Email;
-            return String(item);
-          }).join('; ');
-        } else {
-          responsiblePartyStr = String(responsibleParty || '');
-        }
-        
-        // Try matching by email first
-        if (responsiblePartyStr.toLowerCase().includes(userEmail.toLowerCase())) {
-          return true;
-        }
-        
-        // Try matching by display name
-        if (responsiblePartyStr.toLowerCase().includes(userDisplayName.toLowerCase())) {
-          return true;
-        }
-        
-        // Try matching by initials + display name (like "NK Nick Karamardian")
-        const initials = userDisplayName.split(' ').map(n => n.charAt(0)).join('');
-        const initialsWithName = `${initials} ${userDisplayName}`.toLowerCase();
-        if (responsiblePartyStr.toLowerCase().includes(initialsWithName)) {
-          return true;
-        }
-        
-        return false;
-      });
+    // User metrics (C10: skip users without an email/UPN and never match on
+    // an empty string, which previously matched every task)
+    const userMetrics = users
+      .filter(user => (user.mail || user.userPrincipalName || user.email || user.Email || '').trim() !== '')
+      .map(user => {
+        const userEmail = (user.mail || user.userPrincipalName || user.email || user.Email).trim();
+        const userDisplayName = (user.displayName || user.DisplayName || userEmail).trim();
 
-      const completedUserTasks = userTasks.filter(isCompleted);
-      
-      return {
-        name: userDisplayName,
-        email: userEmail,
-        total: userTasks.length,
-        completed: completedUserTasks.length,
-        percentage: userTasks.length > 0 ? Math.round((completedUserTasks.length / userTasks.length) * 100) : 0
-      };
-    });
+        const userTasks = selectedYearTasks.filter(task => {
+          const responsibleParty = task.responsibleParty || task.ResponsibleParty || '';
+          if (!responsibleParty) return false;
+
+          let responsiblePartyStr = '';
+          if (typeof responsibleParty === 'string') {
+            responsiblePartyStr = responsibleParty;
+          } else if (Array.isArray(responsibleParty)) {
+            responsiblePartyStr = responsibleParty.map(item => {
+              if (typeof item === 'object' && item.LookupValue) return item.LookupValue;
+              if (typeof item === 'object' && item.Email) return item.Email;
+              return String(item);
+            }).join('; ');
+          } else {
+            responsiblePartyStr = String(responsibleParty || '');
+          }
+
+          const responsibleLower = responsiblePartyStr.toLowerCase();
+          if (!responsibleLower.trim()) return false;
+
+          // Try matching by email first
+          if (responsibleLower.includes(userEmail.toLowerCase())) {
+            return true;
+          }
+
+          // Try matching by display name (only if non-empty)
+          if (userDisplayName && responsibleLower.includes(userDisplayName.toLowerCase())) {
+            return true;
+          }
+
+          return false;
+        });
+
+        const completedUserTasks = userTasks.filter(isCompleted);
+
+        return {
+          name: userDisplayName,
+          email: userEmail,
+          total: userTasks.length,
+          completed: completedUserTasks.length,
+          percentage: userTasks.length > 0 ? Math.round((completedUserTasks.length / userTasks.length) * 100) : 0
+        };
+      });
 
     return {
       totalTasksAllTime,

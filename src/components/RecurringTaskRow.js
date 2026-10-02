@@ -10,6 +10,9 @@ import {
 } from '@heroicons/react/24/outline';
 import DeleteConfirmModal from './DeleteConfirmModal';
 import NoteModal from './NoteModal';
+import EditableCell from './EditableCell';
+import MultiResponsiblePartySelector from './MultiResponsiblePartySelector';
+import { getTaskStatus } from '../utils/taskHelpers';
 
 const RecurringTaskRow = ({ 
   template,
@@ -20,20 +23,15 @@ const RecurringTaskRow = ({
   editValueRef,
   saveEdit,
   startEditing,
+  cancelEditing,
   updateTask,
   deleteTask,
   selectedTaskIds,
   toggleSelection,
   saving,
-  calculateStatus,
-  EditableCell,
-  MultiResponsiblePartySelector,
-  createTask,
-  loadTasks,
   isExpanded: controlledIsExpanded,
   onExpandedChange,
   onNoteSave,
-  getResponsiblePartyNames,
   moveToNextCell,
   savingFields,
   savedFields
@@ -139,55 +137,24 @@ const RecurringTaskRow = ({
   }, [allInstances]);
 
   const handleDeleteTemplate = async () => {
-    // FULL DIAGNOSTIC: Log all delete template operations
-    console.group('🔍 DELETE TEMPLATE DIAGNOSTIC');
-    console.log('Timestamp:', new Date().toISOString());
-    console.log('Template ID:', template.id);
-    console.log('Template Title:', template.title || template.Task || 'Unknown');
-    console.log('Template Deadline:', template.deadline_date || template.deadline || 'Unknown');
-    console.log('Instances Count:', allInstances.length);
-    console.log('Instance IDs:', allInstances.map(i => i.id));
-    console.log('Is Expanded:', isExpanded);
-    console.log('Delete Modal State:', { ...deleteModal });
-    console.groupEnd();
-    
-    // CRITICAL FIX: Close modal FIRST to prevent double-clicks
+    // Close modal FIRST to prevent double-clicks
     setDeleteModal({ isOpen: false, itemType: null, item: null });
     
-    // CRITICAL: Delete all instances first, then the template
-    console.log(`🗑️ RecurringTaskRow: Deleting ${allInstances.length} instances before deleting template...`);
-    
-    // Delete all instances in parallel
-    const instanceDeletePromises = allInstances.map(instance => {
-      console.log(`🗑️ RecurringTaskRow: Deleting instance ${instance.id}`);
-      return deleteTask(instance.id, true).catch(error => {
-        console.error(`❌ RecurringTaskRow: Failed to delete instance ${instance.id}:`, error);
+    // Delete all instances first, then the template
+    const instanceDeletePromises = allInstances.map(instance => 
+      deleteTask(instance.id, true).catch(error => {
+        console.error(`RecurringTaskRow: Failed to delete instance ${instance.id}:`, error);
         // Continue with other deletions even if one fails
         return { id: instance.id, error: error.message };
-      });
-    });
+      })
+    );
     
-    try {
-      const instanceResults = await Promise.allSettled(instanceDeletePromises);
-      const successfulInstances = instanceResults.filter(r => r.status === 'fulfilled').length;
-      const failedInstances = instanceResults.filter(r => r.status === 'rejected').length;
-      
-      console.log(`✅ RecurringTaskRow: Deleted ${successfulInstances} instances${failedInstances > 0 ? `, ${failedInstances} failed` : ''}`);
-      
-      // Now delete the template
-      console.log(`🗑️ RecurringTaskRow: Deleting template ${template.id}...`);
-      await deleteTask(template.id, true);
-      console.log(`✅ RecurringTaskRow: Template ${template.id} deleted`);
-    } catch (error) {
-      console.error('❌ RecurringTaskRow: Error deleting template or instances:', error);
-      throw error;
-    }
-    
-    // No need to call loadTasks - deleteTask handles optimistic updates
+    await Promise.allSettled(instanceDeletePromises);
+    await deleteTask(template.id, true);
   };
 
   const handleDeleteInstance = async () => {
-    // CRITICAL FIX: Capture the item ID immediately before any state updates
+    // Capture the item ID immediately before any state updates
     const itemToDelete = deleteModal.item;
     if (!itemToDelete || !itemToDelete.id) {
       console.error('RecurringTaskRow: Cannot delete - item or item.id is missing', deleteModal);
@@ -196,32 +163,12 @@ const RecurringTaskRow = ({
     }
     
     const instanceId = itemToDelete.id;
-    const instanceTitle = itemToDelete.title || itemToDelete.Task || 'Unknown';
-    const instanceDeadline = itemToDelete.deadline_date || itemToDelete.deadline || 'Unknown';
-    
-    console.group('🔍 DELETE INSTANCE DIAGNOSTIC');
-    console.log('Timestamp:', new Date().toISOString());
-    console.log('Instance ID:', instanceId);
-    console.log('Instance Title:', instanceTitle);
-    console.log('Instance Deadline:', instanceDeadline);
-    console.log('Template ID:', template.id);
-    console.log('Delete Modal State:', { ...deleteModal });
-    console.log('Item to Delete:', itemToDelete);
-    console.log('All Instances Count:', allInstances.length);
-    console.log('Instance in allInstances:', allInstances.find(i => i.id === instanceId));
-    console.log('Instance in tasks array:', tasks.find(t => t.id === instanceId));
-    console.log('Is Expanded:', isExpanded);
-    console.groupEnd();
     
     // Close modal FIRST to prevent double-clicks
     setDeleteModal({ isOpen: false, itemType: null, item: null });
     
-    // Delete instance - keep list open
-    // Pass skipConfirm=true so it deletes directly (modal already confirmed)
-    // Use the captured itemToDelete.id, not deleteModal.item.id (which may be stale)
+    // Delete instance directly (modal already confirmed); keep dropdown open
     await deleteTask(instanceId, true);
-    // No need to call loadTasks - deleteTask handles optimistic updates
-    // Keep dropdown open after deletion - don't change isExpanded state
   };
 
   const formatDate = (dateStr) => {
@@ -317,11 +264,11 @@ const RecurringTaskRow = ({
             field="task" 
             className="text-sm font-medium"
             editingCell={editingCell}
-            enterpriseUsers={enterpriseUsers}
             editInputRef={editInputRef}
             editValueRef={editValueRef}
             saveEdit={saveEdit}
             startEditing={startEditing}
+            cancelEditing={cancelEditing}
             moveToNextCell={moveToNextCell}
             savingFields={savingFields}
             savedFields={savedFields}
@@ -333,11 +280,11 @@ const RecurringTaskRow = ({
             field="project" 
             className="text-sm"
             editingCell={editingCell}
-            enterpriseUsers={enterpriseUsers}
             editInputRef={editInputRef}
             editValueRef={editValueRef}
             saveEdit={saveEdit}
             startEditing={startEditing}
+            cancelEditing={cancelEditing}
             moveToNextCell={moveToNextCell}
             savingFields={savingFields}
             savedFields={savedFields}
@@ -372,34 +319,19 @@ const RecurringTaskRow = ({
           )}
         </td>
             <td className="px-4 py-3">
-              {MultiResponsiblePartySelector ? (
-                <MultiResponsiblePartySelector
-                  task={template}
-                  className="text-sm"
-                  editingCell={editingCell}
-                  enterpriseUsers={enterpriseUsers}
-                  editInputRef={editInputRef}
-                  editValueRef={editValueRef}
-                  saveEdit={saveEdit}
-                  startEditing={startEditing}
-                  moveToNextCell={moveToNextCell}
-                  savingFields={savingFields}
-                  savedFields={savedFields}
-                />
-              ) : (
-                <EditableCell 
-                  task={template} 
-                  field="responsibleParty" 
-                  className="text-sm"
-                  editingCell={editingCell}
-                  enterpriseUsers={enterpriseUsers}
-                  editInputRef={editInputRef}
-                  editValueRef={editValueRef}
-                  saveEdit={saveEdit}
-                  startEditing={startEditing}
-                  moveToNextCell={moveToNextCell}
-                />
-              )}
+              <MultiResponsiblePartySelector
+                task={template}
+                className="text-sm"
+                editingCell={editingCell}
+                enterpriseUsers={enterpriseUsers}
+                editInputRef={editInputRef}
+                editValueRef={editValueRef}
+                saveEdit={saveEdit}
+                startEditing={startEditing}
+                moveToNextCell={moveToNextCell}
+                savingFields={savingFields}
+                savedFields={savedFields}
+              />
             </td>
         <td className="px-4 py-3">
           <span className="text-sm text-gray-700 dark:text-gray-300">
@@ -464,11 +396,10 @@ const RecurringTaskRow = ({
         // All instances are actual tasks from the database - no virtual instances
         const displayTask = instance;
         
-        const status = calculateStatus(displayTask);
+        const status = getTaskStatus(displayTask);
         const isSelected = selectedTaskIds.has(instance.id);
-        const isSaving = saving.has(instance.id);
         const isPastDue = status === 'Overdue';
-        const isComplete = status === 'Complete';
+        const isComplete = status === 'Completed';
         const isFaded = isPastDue || isComplete;
         
         return (
@@ -523,11 +454,11 @@ const RecurringTaskRow = ({
                 field="task" 
                 className="text-sm font-medium"
                 editingCell={editingCell}
-                enterpriseUsers={enterpriseUsers}
                 editInputRef={editInputRef}
                 editValueRef={editValueRef}
                 saveEdit={saveEdit}
                 startEditing={startEditing}
+                cancelEditing={cancelEditing}
                 moveToNextCell={moveToNextCell}
                 savingFields={savingFields}
                 savedFields={savedFields}
@@ -539,11 +470,11 @@ const RecurringTaskRow = ({
                 field="project" 
                 className="text-sm"
                 editingCell={editingCell}
-                enterpriseUsers={enterpriseUsers}
                 editInputRef={editInputRef}
                 editValueRef={editValueRef}
                 saveEdit={saveEdit}
                 startEditing={startEditing}
+                cancelEditing={cancelEditing}
                 moveToNextCell={moveToNextCell}
                 savingFields={savingFields}
                 savedFields={savedFields}
@@ -557,11 +488,11 @@ const RecurringTaskRow = ({
                   className="text-sm" 
                   type="date"
                   editingCell={editingCell}
-                  enterpriseUsers={enterpriseUsers}
                   editInputRef={editInputRef}
                   editValueRef={editValueRef}
                   saveEdit={saveEdit}
                   startEditing={startEditing}
+                  cancelEditing={cancelEditing}
                   moveToNextCell={moveToNextCell}
                   savingFields={savingFields}
                   savedFields={savedFields}
@@ -605,34 +536,19 @@ const RecurringTaskRow = ({
               )}
             </td>
             <td className="px-4 py-3 pl-8">
-              {MultiResponsiblePartySelector ? (
-                <MultiResponsiblePartySelector
-                  task={displayTask}
-                  className="text-sm"
-                  editingCell={editingCell}
-                  enterpriseUsers={enterpriseUsers}
-                  editInputRef={editInputRef}
-                  editValueRef={editValueRef}
-                  saveEdit={saveEdit}
-                  startEditing={startEditing}
-                  moveToNextCell={moveToNextCell}
-                  savingFields={savingFields}
-                  savedFields={savedFields}
-                />
-              ) : (
-                <EditableCell 
-                  task={displayTask} 
-                  field="responsibleParty" 
-                  className="text-sm"
-                  editingCell={editingCell}
-                  enterpriseUsers={enterpriseUsers}
-                  editInputRef={editInputRef}
-                  editValueRef={editValueRef}
-                  saveEdit={saveEdit}
-                  startEditing={startEditing}
-                  moveToNextCell={moveToNextCell}
-                />
-              )}
+              <MultiResponsiblePartySelector
+                task={displayTask}
+                className="text-sm"
+                editingCell={editingCell}
+                enterpriseUsers={enterpriseUsers}
+                editInputRef={editInputRef}
+                editValueRef={editValueRef}
+                saveEdit={saveEdit}
+                startEditing={startEditing}
+                moveToNextCell={moveToNextCell}
+                savingFields={savingFields}
+                savedFields={savedFields}
+              />
             </td>
             <td className="px-4 py-3 pl-8">
               <span className="text-sm text-gray-700 dark:text-gray-300">
@@ -641,7 +557,7 @@ const RecurringTaskRow = ({
             </td>
             <td className="px-4 py-3 pl-8">
               <span className={`inline-flex px-3 py-1 text-xs font-semibold rounded-full ${
-                status === 'Complete' 
+                status === 'Completed' 
                   ? 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-300'
                   : status === 'Overdue'
                   ? 'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-300'

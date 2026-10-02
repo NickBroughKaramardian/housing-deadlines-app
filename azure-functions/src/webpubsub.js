@@ -1,5 +1,8 @@
 const { WebPubSubServiceClient } = require('@azure/web-pubsub');
 
+// Single hub name, used both when constructing the client and for tokens.
+const HUB_NAME = 'ccprojectmanager';
+
 let serviceClient = null;
 
 function getServiceClient() {
@@ -9,7 +12,7 @@ function getServiceClient() {
       console.warn('WEB_PUBSUB_CONNECTION_STRING not set, real-time features disabled');
       return null;
     }
-    serviceClient = new WebPubSubServiceClient(connectionString, 'ccprojectmanager');
+    serviceClient = new WebPubSubServiceClient(connectionString, HUB_NAME);
   }
   return serviceClient;
 }
@@ -18,25 +21,17 @@ async function publishEvent(eventType, data, userId = null) {
   const client = getServiceClient();
   if (!client) return;
 
-  try {
-    const event = {
-      type: eventType,
-      data: data,
-      timestamp: new Date().toISOString(),
-      userId: userId
-    };
+  const event = {
+    type: eventType,
+    data,
+    timestamp: new Date().toISOString(),
+    userId,
+  };
 
-    // Publish to all users or specific user
-    const hub = client.hub('tasks');
-    if (userId) {
-      await hub.sendToUser(userId, event);
-    } else {
-      await hub.broadcast(event);
-    }
-    
-    console.log(`Published ${eventType} event:`, data);
-  } catch (error) {
-    console.error('Failed to publish event:', error);
+  if (userId) {
+    await client.sendToUser(userId, event);
+  } else {
+    await client.sendToAll(event);
   }
 }
 
@@ -44,20 +39,14 @@ async function getClientAccessToken(userId) {
   const client = getServiceClient();
   if (!client) return null;
 
-  try {
-    const hub = client.hub('tasks');
-    const token = await hub.getClientAccessToken({
-      userId: userId,
-      roles: ['webpubsub.sendToGroup.tasks', 'webpubsub.joinLeaveGroup.tasks']
-    });
-    return token;
-  } catch (error) {
-    console.error('Failed to get client access token:', error);
-    return null;
-  }
+  return client.getClientAccessToken({
+    userId,
+    roles: ['webpubsub.sendToGroup.tasks', 'webpubsub.joinLeaveGroup.tasks'],
+  });
 }
 
 module.exports = {
   publishEvent,
-  getClientAccessToken
+  getClientAccessToken,
+  HUB_NAME,
 };

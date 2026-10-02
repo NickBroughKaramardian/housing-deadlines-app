@@ -17,6 +17,23 @@
 
 import { azureTaskService } from './azureTaskService';
 
+// Bounded concurrency for batch operations: process in chunks instead of
+// firing an unbounded Promise.all against the API.
+const BATCH_CHUNK_SIZE = 25;
+
+async function runChunkedSettled(items, worker, chunkSize = BATCH_CHUNK_SIZE, onChunkDone = null) {
+  const results = [];
+  for (let i = 0; i < items.length; i += chunkSize) {
+    const chunk = items.slice(i, i + chunkSize);
+    const settled = await Promise.allSettled(chunk.map(worker));
+    results.push(...settled);
+    if (onChunkDone) {
+      onChunkDone(results);
+    }
+  }
+  return results;
+}
+
 class TaskManager {
   constructor() {
     this.tasks = [];
@@ -129,14 +146,15 @@ class TaskManager {
       throw new Error(`Task ${id} not found`);
     }
 
-    // Normalize updates
-    const normalizedUpdates = this.normalizeTask(updates);
+    // Normalize updates WITHOUT injecting defaults (C1): a partial update must
+    // never add fields the caller didn't pass (e.g. priority: 'Normal').
+    const normalizedUpdates = this.normalizeUpdates(updates);
     
     // Store original task for rollback
     const originalTask = { ...existingTask };
     
     // Optimistic update
-    const optimisticTask = { ...existingTask, ...normalizedUpdates, _optimistic: true };
+    const optimisticTask = { ...this.applyUpdatesToTask(existingTask, normalizedUpdates), _optimistic: true };
     this.tasks = this.tasks.map(t => t.id === id ? optimisticTask : t);
     this.emit('updated', { task: optimisticTask });
 
@@ -216,31 +234,40 @@ class TaskManager {
     this.tasks = [...this.tasks, ...optimisticTasks];
     this.emit('batchCreated', { tasks: optimisticTasks });
 
-    // Save to Cosmos DB in background (batched)
-    try {
-      const savedTasks = await Promise.all(
-        normalizedTasks.map(task => azureTaskService.createTask(task))
-      );
-      const finalTasks = savedTasks.map(t => this.normalizeTask(t));
-      
-      // Replace optimistic tasks with saved tasks (mark as confirmed)
-      const confirmedTasks = finalTasks.map(t => ({ ...t, _confirmed: true }));
-      this.tasks = this.tasks.map(t => {
+    // Save to Cosmos DB in bounded-concurrency chunks (P4)
+    const results = await runChunkedSettled(normalizedTasks, task => azureTaskService.createTask(task));
+
+    const confirmedTasks = [];
+    const failedIds = [];
+    results.forEach((result, index) => {
+      if (result.status === 'fulfilled') {
+        confirmedTasks.push({ ...this.normalizeTask(result.value), _confirmed: true });
+      } else {
+        failedIds.push(normalizedTasks[index].id);
+        console.error(`TaskManager: Failed to create task ${normalizedTasks[index].id}:`, result.reason);
+      }
+    });
+
+    // Replace optimistic tasks with saved tasks, roll back the failed ones
+    const failedIdSet = new Set(failedIds);
+    this.tasks = this.tasks
+      .filter(t => !(failedIdSet.has(t.id) && t._optimistic))
+      .map(t => {
         const saved = confirmedTasks.find(st => st.id === t.id);
         return saved && t._optimistic ? saved : t;
       });
-      
-      this.emit('batchUpdated', { tasks: confirmedTasks });
-      return confirmedTasks;
-    } catch (error) {
-      console.error('TaskManager: Failed to batch create tasks', error);
-      
-      // Rollback optimistic updates
-      const optimisticIds = new Set(optimisticTasks.map(t => t.id));
-      this.tasks = this.tasks.filter(t => !optimisticIds.has(t.id) || !t._optimistic);
+
+    this.emit('batchUpdated', { tasks: confirmedTasks });
+
+    if (failedIds.length > 0) {
+      const error = new Error(`Failed to create ${failedIds.length} of ${normalizedTasks.length} tasks`);
+      error.failedIds = failedIds;
+      error.successfulTasks = confirmedTasks;
       this.emit('error', { error, operation: 'batchCreate' });
       throw error;
     }
+
+    return confirmedTasks;
   }
 
   /**
@@ -259,10 +286,9 @@ class TaskManager {
       const existingTask = this.getTaskById(id);
       if (existingTask) {
         tasksInMemory.add(id);
-        const normalizedUpdates = this.normalizeTask(taskUpdates);
+        const normalizedUpdates = this.normalizeUpdates(taskUpdates);
         const optimisticTask = { 
-          ...existingTask, 
-          ...normalizedUpdates, 
+          ...this.applyUpdatesToTask(existingTask, normalizedUpdates), 
           _optimistic: true,
           _optimisticTimestamp: Date.now() // Track when optimistic update was created
         };
@@ -275,12 +301,11 @@ class TaskManager {
     
     this.emit('batchUpdated', { tasks: this.tasks.filter(t => updates.some(u => u.id === t.id)) });
 
-    // Save to Cosmos DB in background (batched) - use Promise.allSettled for partial failures
+    // Save to Cosmos DB in bounded-concurrency chunks (P4), tolerating partial failures
     try {
-      const results = await Promise.allSettled(
-        updates.map(({ id, updates: taskUpdates }) => 
-          azureTaskService.updateTask(id, this.normalizeTask(taskUpdates))
-        )
+      const results = await runChunkedSettled(
+        updates,
+        ({ id, updates: taskUpdates }) => azureTaskService.updateTask(id, this.normalizeUpdates(taskUpdates))
       );
       
       const savedTasks = [];
@@ -374,14 +399,12 @@ class TaskManager {
    * @param {string[]} ids - Array of task IDs to delete
    * @param {Object} options - Optional configuration
    * @param {Function} options.onProgress - Callback for progress updates
-   * @param {number} options.chunkSize - Number of tasks to delete per chunk (default: 100)
-   * @param {number} options.threshold - Minimum number of tasks to use chunking (default: 1000)
+   * @param {number} options.chunkSize - Number of tasks to delete per chunk (default: 25)
    */
   async batchDelete(ids, options = {}) {
     const { 
       onProgress, 
-      chunkSize = 100,
-      threshold = 1000 
+      chunkSize = BATCH_CHUNK_SIZE
     } = options;
 
     const originalTasks = ids.map(id => this.getTaskById(id)).filter(Boolean);
@@ -390,24 +413,7 @@ class TaskManager {
     this.tasks = this.tasks.filter(t => !ids.includes(t.id));
     this.emit('batchDeleted', { taskIds: ids, tasks: originalTasks });
 
-    // Fast path for small batches (backward compatible)
-    if (ids.length < threshold && !onProgress) {
-      try {
-        await Promise.all(ids.map(id => azureTaskService.deleteTask(id)));
-        this.emit('batchDeleted', { taskIds: ids, tasks: originalTasks, confirmed: true });
-        return { success: ids.length, errors: 0 };
-      } catch (error) {
-        console.error('TaskManager: Failed to batch delete tasks', error);
-        
-        // Rollback optimistic updates
-        this.tasks = [...this.tasks, ...originalTasks];
-        this.emit('error', { error, operation: 'batchDelete' });
-        this.emit('batchCreated', { tasks: originalTasks }); // Re-emit as created for rollback
-        throw error;
-      }
-    }
-
-    // Chunked deletion with progress tracking
+    // Chunked deletion with progress tracking (bounded concurrency for all batch sizes)
     let completed = 0;
     let successCount = 0;
     let errorCount = 0;
@@ -423,15 +429,15 @@ class TaskManager {
         );
         
         // Process results and update counters
-        results.forEach((result, index) => {
-          completed++;
-          if (result.status === 'fulfilled') {
+        completed += results.length;
+        for (let j = 0; j < results.length; j++) {
+          if (results[j].status === 'fulfilled') {
             successCount++;
           } else {
             errorCount++;
-            errors.push({ id: chunk[index], error: result.reason?.message || 'Unknown error' });
+            errors.push({ id: chunk[j], error: results[j].reason?.message || 'Unknown error' });
           }
-        });
+        }
         
         // Emit progress update after processing chunk
         // Report success count (actual deletions) not completed (attempts)
@@ -563,16 +569,6 @@ class TaskManager {
    * Emit event to all subscribers
    */
   emit(eventType, data) {
-    // Emit custom DOM event for cross-component communication
-    window.dispatchEvent(new CustomEvent('taskDataChanged', {
-      detail: {
-        type: eventType,
-        ...data,
-        timestamp: Date.now()
-      }
-    }));
-
-    // Also notify direct subscribers
     this.subscribers.forEach(callback => {
       try {
         callback({ type: eventType, ...data });
@@ -645,6 +641,61 @@ class TaskManager {
   }
 
   /**
+   * Normalize an update payload (C1).
+   * Unlike normalizeTask, this:
+   * - NEVER adds default fields (no priority: 'Normal' injection)
+   * - only includes fields the caller actually passed
+   * - maps legacy uppercase field names onto the canonical lowercase ones
+   *   instead of mirroring every field into both casings
+   */
+  normalizeUpdates(updates) {
+    if (!updates || typeof updates !== 'object') {
+      return updates;
+    }
+
+    const fieldMap = {
+      Project: 'project',
+      ResponsibleParty: 'responsibleParty',
+      Task: 'title',
+      Priority: 'priority',
+      Deadline: 'deadline_date',
+      deadline: 'deadline_date'
+    };
+
+    const normalized = {};
+    Object.entries(updates).forEach(([key, value]) => {
+      const canonicalKey = fieldMap[key] || key;
+      normalized[canonicalKey] = value;
+    });
+    return normalized;
+  }
+
+  /**
+   * Merge a normalized update payload into an existing task for the in-memory
+   * copy. Removes stale legacy-cased twins of updated fields so display
+   * fallbacks (task.project || task.Project) don't show outdated values.
+   */
+  applyUpdatesToTask(existingTask, normalizedUpdates) {
+    const legacyTwins = {
+      project: ['Project'],
+      responsibleParty: ['ResponsibleParty'],
+      title: ['Task'],
+      priority: ['Priority'],
+      deadline_date: ['deadline', 'Deadline']
+    };
+
+    const merged = { ...existingTask, ...normalizedUpdates };
+    Object.keys(normalizedUpdates).forEach(key => {
+      (legacyTwins[key] || []).forEach(twin => {
+        if (twin in merged && !(twin in normalizedUpdates)) {
+          delete merged[twin];
+        }
+      });
+    });
+    return merged;
+  }
+
+  /**
    * Normalize array of tasks
    */
   normalizeTasks(tasks) {
@@ -672,8 +723,5 @@ export const taskManager = new TaskManager();
 if (typeof window !== 'undefined') {
   window.__VERIFY_TASKS__ = () => taskManager.verifyTasks();
   window.__TASK_MANAGER__ = taskManager;
-  console.log('🔍 TaskManager: Debug functions available:');
-  console.log('   window.__VERIFY_TASKS__() - Verify tasks match database');
-  console.log('   window.__TASK_MANAGER__ - Access TaskManager instance');
 }
 
